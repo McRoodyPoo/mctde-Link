@@ -34,6 +34,31 @@ ChainloadFolder=mctde-Link-Chainload
 
 By default, that folder should live next to `d3d9.dll` in the PTDE `DATA` folder.
 
+## Phantom Break Compatibility
+
+Phantom Break can be loaded alongside `mctde-Link` through the chainload folder, but the overlay is not fully compatible with Phantom Break yet.
+
+Current limitation: the overlay roster is still built around the normal four-player PTDE world layout. A fifth Phantom Break player will not populate into a new fifth row, and if one of the four rostered players leaves, the fifth player will not automatically move into the open overlay slot.
+
+To enable Phantom Break with `mctde-Link`:
+
+1. Keep `d3d9.dll` and `mctde-link.ini` in the PTDE `DATA` folder.
+2. Create the chainload folder next to `d3d9.dll` if it does not already exist:
+
+```text
+Dark Souls Prepare to Die Edition/DATA/mctde-Link-Chainload/
+```
+
+3. Put Phantom Break's DLL in that folder.
+4. Keep this INI setting:
+
+```ini
+[Compatibility]
+ChainloadFolder=mctde-Link-Chainload
+```
+
+To disable Phantom Break, remove its DLL from `mctde-Link-Chainload` or move it somewhere outside the PTDE `DATA` folder. If you configured Phantom Break through a `GenericDLL` entry instead, blank that entry in `mctde-link.ini`.
+
 ## OBS / WebSocket Overlay
 
 The mod can also serve a local browser overlay for OBS or other browser-source tools.

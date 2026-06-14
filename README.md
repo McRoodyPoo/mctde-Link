@@ -15,13 +15,6 @@ README.md
 CONFIG_REFERENCE.md
 ```
 
-Copy only these runtime files into your PTDE `DATA` folder:
-
-```text
-d3d9.dll
-mctde-link.ini
-```
-
 Example target:
 
 ```text

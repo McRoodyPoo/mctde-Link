@@ -1,0 +1,357 @@
+--- /mnt/data/work/orig_mctde/mctde-Link/mctde-Link/dllmain.cpp	2026-06-13 20:55:09.069559097 +0000
++++ /mnt/data/work/mctde/mctde-Link/mctde-Link/dllmain.cpp	2026-06-13 21:32:36.256945920 +0000
+@@ -4,6 +4,8 @@
+ #include <string>
+ #include <cstring>
+ #include <cstdio>
++#include <vector>
++#include <algorithm>
+ 
+ #ifdef MCTDE_LINK_SINGLE_DLL
+ extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule);
+@@ -25,6 +27,92 @@
+ 
+ HWND g_gameWindow = NULL;
+ 
++static volatile LONG g_compatChainloadState = 0;
++
++// ------------------------------------------------------------
++// Path helpers
++// ------------------------------------------------------------
++
++std::string GetExeDirectory()
++{
++    char exePath[MAX_PATH] = { 0 };
++
++    if (GetModuleFileNameA(NULL, exePath, MAX_PATH) == 0)
++    {
++        return ".";
++    }
++
++    char* lastSlash = strrchr(exePath, '\\');
++    if (!lastSlash)
++    {
++        return ".";
++    }
++
++    *lastSlash = '\0';
++    return std::string(exePath);
++}
++
++bool IsAbsolutePathA(const char* path)
++{
++    if (!path || !path[0])
++    {
++        return false;
++    }
++
++    // C:\folder or D:/folder
++    if (((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
++        path[1] == ':' &&
++        (path[2] == '\\' || path[2] == '/'))
++    {
++        return true;
++    }
++
++    // UNC path: \\server\share
++    return (path[0] == '\\' && path[1] == '\\');
++}
++
++std::string ResolveGamePath(const char* path)
++{
++    if (!path || !path[0])
++    {
++        return "";
++    }
++
++    if (IsAbsolutePathA(path))
++    {
++        return std::string(path);
++    }
++
++    std::string base = GetExeDirectory();
++    if (!base.empty() && base[base.size() - 1] != '\\' && base[base.size() - 1] != '/')
++    {
++        base += "\\";
++    }
++
++    return base + path;
++}
++
++std::string GetHubIniPath()
++{
++    return ResolveGamePath(HUB_INI_FILE);
++}
++
++std::string GetFileNameOnly(const std::string& path)
++{
++    size_t slash = path.find_last_of("\\/");
++    if (slash == std::string::npos)
++    {
++        return path;
++    }
++
++    return path.substr(slash + 1);
++}
++
++bool EqualsIgnoreCaseA(const std::string& a, const std::string& b)
++{
++    return _stricmp(a.c_str(), b.c_str()) == 0;
++}
++
+ // ------------------------------------------------------------
+ // Logging
+ // ------------------------------------------------------------
+@@ -177,7 +265,7 @@
+     if (!initProc)
+     {
+         std::string message = dllName;
+-        message += " does not export initialize_plugin.";
++        message += " has no initialize_plugin export; leaving it loaded as a DllMain-only compatibility DLL.";
+         WriteHubLogString(message);
+         return;
+     }
+@@ -203,7 +291,7 @@
+     {
+         message = "Found render_overlay in ";
+         message += dllName;
+-        message += ", but this stable hub does not call it yet.";
++        message += ", but mctde-Link does not call foreign render_overlay callbacks. DllMain/initialize_plugin startup is still supported.";
+ 
+         WriteHubLogString(message);
+     }
+@@ -215,20 +303,38 @@
+ 
+ void LoadOneDll(const char* dllName)
+ {
+-    std::string attemptMessage = "Attempting to load ";
+-    attemptMessage += dllName;
++    if (!dllName || strlen(dllName) == 0)
++    {
++        return;
++    }
++
++    std::string resolvedPath = ResolveGamePath(dllName);
++    std::string fileName = GetFileNameOnly(resolvedPath);
++
++    // Do not recursively load another d3d9 proxy through the compatibility chainloader.
++    if (EqualsIgnoreCaseA(fileName, "d3d9.dll"))
++    {
++        std::string skipMessage = "Skipping ";
++        skipMessage += resolvedPath;
++        skipMessage += " because d3d9.dll is mctde-Link's own proxy slot.";
++        WriteHubLogString(skipMessage);
++        return;
++    }
++
++    std::string attemptMessage = "Attempting to load compatibility DLL ";
++    attemptMessage += resolvedPath;
+     attemptMessage += ".";
+ 
+     WriteHubLogString(attemptMessage);
+ 
+-    HMODULE loadedDll = LoadLibraryA(dllName);
++    HMODULE loadedDll = LoadLibraryA(resolvedPath.c_str());
+ 
+     if (!loadedDll)
+     {
+         DWORD errorCode = GetLastError();
+ 
+         std::string message = "Failed to load ";
+-        message += dllName;
++        message += resolvedPath;
+         message += ". Error code: ";
+         message += std::to_string(errorCode);
+         message += ". Message: ";
+@@ -238,13 +344,13 @@
+         return;
+     }
+ 
+-    std::string successMessage = "Loaded ";
+-    successMessage += dllName;
++    std::string successMessage = "Loaded compatibility DLL ";
++    successMessage += resolvedPath;
+     successMessage += ".";
+ 
+     WriteHubLogString(successMessage);
+ 
+-    TryInitializePlugin(loadedDll, dllName);
++    TryInitializePlugin(loadedDll, resolvedPath.c_str());
+ }
+ 
+ // ------------------------------------------------------------
+@@ -253,8 +359,9 @@
+ 
+ void LoadGenericDlls()
+ {
+-    WriteHubLog("Loading generic DLLs from ini.");
++    WriteHubLog("Loading GenericDLL entries from MCTDE_D3D9_Hub.ini.");
+ 
++    std::string iniPath = GetHubIniPath();
+     char dllName[MAX_PATH] = { 0 };
+ 
+     for (int i = 0; i < 32; i++)
+@@ -270,7 +377,7 @@
+             "",
+             dllName,
+             MAX_PATH,
+-            HUB_INI_FILE
++            iniPath.c_str()
+         );
+ 
+         if (strlen(dllName) == 0)
+@@ -281,7 +388,118 @@
+         LoadOneDll(dllName);
+     }
+ 
+-    WriteHubLog("Finished loading generic DLLs.");
++    WriteHubLog("Finished loading GenericDLL entries.");
++}
++
++void LoadDllsFromFolder(const char* folderName)
++{
++    if (!folderName || !folderName[0])
++    {
++        return;
++    }
++
++    std::string folder = ResolveGamePath(folderName);
++    std::string mask = folder;
++    if (!mask.empty() && mask[mask.size() - 1] != '\\' && mask[mask.size() - 1] != '/')
++    {
++        mask += "\\";
++    }
++    mask += "*.dll";
++
++    WIN32_FIND_DATAA findData;
++    ZeroMemory(&findData, sizeof(findData));
++
++    HANDLE find = FindFirstFileA(mask.c_str(), &findData);
++    if (find == INVALID_HANDLE_VALUE)
++    {
++        std::string message = "Compatibility chainload folder not found or empty: ";
++        message += folder;
++        WriteHubLogString(message);
++        return;
++    }
++
++    std::vector<std::string> dlls;
++
++    do
++    {
++        if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
++        {
++            continue;
++        }
++
++        std::string name = findData.cFileName;
++        if (EqualsIgnoreCaseA(name, "d3d9.dll"))
++        {
++            continue;
++        }
++
++        std::string full = folder;
++        if (!full.empty() && full[full.size() - 1] != '\\' && full[full.size() - 1] != '/')
++        {
++            full += "\\";
++        }
++        full += name;
++        dlls.push_back(full);
++    }
++    while (FindNextFileA(find, &findData));
++
++    FindClose(find);
++
++    std::sort(dlls.begin(), dlls.end(), [](const std::string& a, const std::string& b) {
++        return _stricmp(a.c_str(), b.c_str()) < 0;
++    });
++
++    std::string message = "Loading compatibility chainload folder: ";
++    message += folder;
++    WriteHubLogString(message);
++
++    for (size_t i = 0; i < dlls.size(); i++)
++    {
++        LoadOneDll(dlls[i].c_str());
++    }
++
++    WriteHubLog("Finished loading compatibility chainload folder.");
++}
++
++void LoadCompatibilityDllsOnce()
++{
++    LONG previous = InterlockedCompareExchange(&g_compatChainloadState, 1, 0);
++
++    if (previous == 2)
++    {
++        return;
++    }
++
++    if (previous == 1)
++    {
++        // Re-entrant LoadLibrary/DllMain paths can happen with hook DLLs. Do not wait here;
++        // waiting can deadlock if the DLL being loaded touches d3d9 during its own startup.
++        WriteHubLog("Compatibility DLL chainload pass already in progress; skipping re-entrant call.");
++        return;
++    }
++
++    WriteHubLog("Starting compatibility DLL chainload pass.");
++
++    LoadGenericDlls();
++
++    std::string iniPath = GetHubIniPath();
++    char folderName[MAX_PATH] = { 0 };
++    GetPrivateProfileStringA(
++        "Compatibility",
++        "ChainloadFolder",
++        "mctde-Link_Chainload",
++        folderName,
++        MAX_PATH,
++        iniPath.c_str()
++    );
++
++    if (strlen(folderName) > 0)
++    {
++        LoadDllsFromFolder(folderName);
++    }
++
++    WriteHubLog("Finished compatibility DLL chainload pass.");
++    InterlockedExchange(&g_compatChainloadState, 2);
+ }
+ 
+ // ------------------------------------------------------------
+@@ -290,14 +508,16 @@
+ 
+ void StartBuiltInModules()
+ {
++    // Load third-party compatibility DLLs before the built-in overlay begins its delayed hook setup.
++    // This lets DllMain-driven mods such as PTDE Practice Tool's dinput8/hudhook DLL install early.
++    LoadCompatibilityDllsOnce();
++
+ #ifdef MCTDE_LINK_SINGLE_DLL
+     WriteHubLog("Starting built-in MCTDE_NetOverlay module.");
+     initialize_plugin();
+ 
+     WriteHubLog("Starting built-in VersionChecker module.");
+     McTDE_VersionChecker_Start();
+-#else
+-    LoadGenericDlls();
+ #endif
+ }
+ 
+@@ -332,6 +552,7 @@
+ 
+ extern "C" void* WINAPI Direct3DCreate9(UINT SDKVersion)
+ {
++    LoadCompatibilityDllsOnce();
+     LoadRealD3D9();
+ 
+     if (!g_realDirect3DCreate9)
+@@ -352,6 +573,7 @@
+ 
+ extern "C" HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, void** ppD3D)
+ {
++    LoadCompatibilityDllsOnce();
+     LoadRealD3D9();
+ 
+     if (!g_realDirect3DCreate9Ex)

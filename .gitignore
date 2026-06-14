@@ -1,0 +1,40 @@
+# Visual Studio
+.vs/
+Debug/
+Release/
+x64/
+x86/
+*.user
+*.suo
+*.VC.db
+*.VC.VC.opendb
+*.opensdf
+*.sdf
+*.ipch
+
+# Build outputs and intermediates
+*.obj
+*.iobj
+*.ipdb
+*.ilk
+*.pdb
+*.exp
+*.lib
+*.recipe
+*.tlog
+*.lastbuildstate
+*.FileListAbsolute.txt
+*.Build.CppClean.log
+
+# Runtime logs
+*.log
+MCTDE_NetOverlay_*.log
+VersionCheck.log
+
+# Archives
+*.zip
+*.7z
+*.rar
+
+# Keep the checked-in release DLL intentionally.
+!dist/d3d9.dll

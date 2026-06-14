@@ -1,0 +1,9 @@
+LIBRARY "d3d9"
+
+EXPORTS
+    Direct3DCreate9
+    Direct3DCreate9Ex
+
+    ?get_game_window@@YAPAUHWND__@@XZ
+    ?console_is_open@@YA_NXZ
+    ?print_console@@YA_NAAV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z

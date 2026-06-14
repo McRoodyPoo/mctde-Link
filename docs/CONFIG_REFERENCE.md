@@ -126,6 +126,16 @@ Optional supported key. Controls how long a learned player-number to SteamID ide
 
 ## WebSocket
 
+The WebSocket feature serves a local browser overlay. It is meant for OBS Browser Source or other local browser-source tools. It is not an outbound webhook.
+
+Browser source URL:
+
+```text
+http://127.0.0.1:39876/overlay.html
+```
+
+If you change `Port`, replace `39876` in the URL with your configured port.
+
 `Enabled=0`
 
 Enables the local OBS/browser-source WebSocket overlay server. The external GDI overlay works without this.

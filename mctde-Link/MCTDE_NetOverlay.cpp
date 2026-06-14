@@ -361,6 +361,12 @@ static DWORD g_identityTtlMs = 120000;
 //
 // OBS Browser Source URL:
 //   http://127.0.0.1:39876/overlay.html
+//
+// If Port is changed in mctde-link.ini, use:
+//   http://127.0.0.1:<Port>/overlay.html
+//
+// This is a local WebSocket/browser-source server for OBS. It is not an
+// outbound webhook and does not send data to the internet.
 // ------------------------------------------------------------
 static bool g_webSocketEnabled = true;
 static int g_webSocketPort = 39876;

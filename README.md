@@ -24,6 +24,27 @@ If you chainload other DLLs, put them in the folder configured by:
 ChainloadFolder=mctde-Link-Chainload
 ```
 
+## OBS / WebSocket Overlay
+
+The mod can also serve a local browser overlay for OBS or other browser-source tools.
+
+Enable it in `mctde-link.ini`:
+
+```ini
+[WebSocket]
+Enabled=1
+Port=39876
+SendMs=33
+```
+
+Then add this URL as an OBS Browser Source:
+
+```text
+http://127.0.0.1:39876/overlay.html
+```
+
+The WebSocket server is local-only and binds to `127.0.0.1`.
+
 ## Build
 
 Requirements:

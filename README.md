@@ -59,20 +59,6 @@ Build command:
 & 'Z:\Visual Studio\MSBuild\Current\Bin\MSBuild.exe' '.\mctde-Link.sln' /t:Clean,Rebuild /p:Configuration=Release /p:Platform=x86 /m /v:minimal
 ```
 
-The DLL is emitted as:
-
-```text
-Release/d3d9.dll
-```
-
-## Runtime Notes
-
-- Logging is disabled by default in `mctde-link.ini`.
-- The overlay keeps confirmed names stable for the current roster.
-- HP, name, and ping fields are designed to keep their last good value until a valid replacement exists.
-- True ping requires the remote player to run a compatible build. Non-compatible players can still show cached/session ping when the game or Steam exposes it.
-- See `docs/CONFIG_REFERENCE.md` for an explanation of every INI option.
-
 ## Repository Layout
 
 ```text

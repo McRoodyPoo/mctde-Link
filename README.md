@@ -15,7 +15,7 @@ README.md
 CONFIG_REFERENCE.md
 ```
 
-Example target:
+Copy `d3d9.dll` and `mctde-link.ini` to:
 
 ```text
 Dark Souls Prepare to Die Edition/DATA/

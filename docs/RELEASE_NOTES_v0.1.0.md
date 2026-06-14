@@ -1,13 +1,17 @@
-# mctde-Link v1.0.0
+# mctde-Link v0.1.0
 
-This is the first full release candidate.
+This is the first public release candidate.
 
 ## Included
 
-- `dist/d3d9.dll`
-- `dist/mctde-link.ini`
-- Visual Studio source project
-- Install notes and compatibility docs
+The end-user release package contains only:
+
+- `d3d9.dll`
+- `mctde-link.ini`
+- `README.md`
+- `CONFIG_REFERENCE.md`
+
+The source package contains the Visual Studio solution, project source, sample config, docs, and changelog.
 
 ## Default Config
 

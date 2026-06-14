@@ -26,7 +26,7 @@ Optional explicit DLL entries to load during startup. Leave blank to disable. Th
 
 `ShowHeader=1`
 
-Legacy layout toggle. It is still read by the config loader, but the current compact overlay does not draw a header, so this has no visible effect in v1.0.0.
+Legacy layout toggle. It is still read by the config loader, but the current compact overlay does not draw a header, so this has no visible effect in v0.1.0.
 
 `MarkerGutterExtra=8`
 
@@ -228,7 +228,7 @@ Optional supported key. EWMA weight used by `DisplayMode=1`. Clamped to `1` thro
 
 ## Legacy Keys
 
-These keys may exist in older test configs but are not read by the v1.0.0 source:
+These keys may exist in older test configs but are not read by the v0.1.0 source:
 
 - `Overlay.AllowUnambiguousSteamFallback`
 - `Overlay.AllowDisplayNamePingFallback`

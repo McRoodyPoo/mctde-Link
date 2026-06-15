@@ -36,28 +36,36 @@ By default, that folder should live next to `d3d9.dll` in the PTDE `DATA` folder
 
 ## Phantom Break Compatibility
 
-Phantom Break can be loaded alongside `mctde-Link` through the chainload folder, but the overlay is not fully compatible with Phantom Break yet.
+Phantom Break can be loaded alongside `mctde-Link` through an explicit `GenericDLL` entry in `mctde-link.ini`, but the overlay is not fully compatible with Phantom Break yet.
 
 Current limitation: the overlay roster is still built around the normal four-player PTDE world layout. A fifth Phantom Break player will not populate into a new fifth row, and if one of the four rostered players leaves, the fifth player will not automatically move into the open overlay slot.
 
 To enable Phantom Break with `mctde-Link`:
 
 1. Keep `d3d9.dll` and `mctde-link.ini` in the PTDE `DATA` folder.
-2. Create the chainload folder next to `d3d9.dll` if it does not already exist:
-
-```text
-Dark Souls Prepare to Die Edition/DATA/mctde-Link-Chainload/
-```
-
-3. Put Phantom Break's DLL in that folder.
-4. Keep this INI setting:
+2. Put Phantom Break's DLL in the PTDE `DATA` folder, or keep it elsewhere and use its full path.
+3. Add it to an open slot under `[DLLs]`:
 
 ```ini
-[Compatibility]
-ChainloadFolder=mctde-Link-Chainload
+[DLLs]
+GenericDLL0=PhantomBreak.dll
 ```
 
-To disable Phantom Break, remove its DLL from `mctde-Link-Chainload` or move it somewhere outside the PTDE `DATA` folder. If you configured Phantom Break through a `GenericDLL` entry instead, blank that entry in `mctde-link.ini`.
+If the DLL is not in the PTDE `DATA` folder, use the full path instead:
+
+```ini
+[DLLs]
+GenericDLL0=C:\Path\To\PhantomBreak.dll
+```
+
+Use the first empty `GenericDLL` slot if `GenericDLL0` is already used.
+
+To disable Phantom Break, blank its `GenericDLL` entry in `mctde-link.ini`:
+
+```ini
+[DLLs]
+GenericDLL0=
+```
 
 ## OBS / WebSocket Overlay
 

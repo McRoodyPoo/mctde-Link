@@ -24,7 +24,7 @@
 #define VERSION_HOST L"raw.githubusercontent.com"
 #define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/latest.txt"
 
-#define MCTDE_DOWNLOAD_URL "https://www.nexusmods.com/darksouls/mods/1926"
+#define MCTDE_DOWNLOAD_URL "https://www.nexusmods.com/darksouls/mods/1926?tab=files"
 #define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases/download/0.1.1/mctde-Link-0.1.1-release.zip"
 
 static bool g_versionLoggingConfigured = false;

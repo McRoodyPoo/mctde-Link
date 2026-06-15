@@ -12,16 +12,15 @@
 
 // Your installed mod version.
 // Change this every time you release a new version.
-#define CURRENT_VERSION "0.88"
+#define CURRENT_VERSION "0.1.1"
 
 // Your GitHub raw file info.
 // Full URL:
-// https://raw.githubusercontent.com/McRoodyPoo/mctde/refs/heads/main/latest.txt
+// https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/refs/heads/main/latest
 #define VERSION_HOST L"raw.githubusercontent.com"
-#define VERSION_PATH L"/McRoodyPoo/mctde/refs/heads/main/latest.txt"
+#define VERSION_PATH L"/McRoodyPoo/mctde-Link/refs/heads/main/latest"
 
-// Change this to your actual mod download page later.
-#define DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde"
+#define DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases/latest"
 
 static bool g_versionLoggingConfigured = false;
 static bool g_versionLoggingEnabled = false;
@@ -281,7 +280,7 @@ DWORD WINAPI VersionCheckThread(LPVOID)
         WriteLog("Update available.");
 
         std::string popupMessage =
-            "A new version of MCTDE is available.\n\n"
+            "A new version of mctde-Link is available.\n\n"
             "Installed version: " + currentVersion + "\n"
             "Latest version: " + latestVersion + "\n\n"
             "You can keep playing, but you may run into bugs that have already been fixed.\n\n"
@@ -290,7 +289,7 @@ DWORD WINAPI VersionCheckThread(LPVOID)
         int result = MessageBoxA(
             NULL,
             popupMessage.c_str(),
-            "MCTDE Update Available",
+            "mctde-Link Update Available",
             MB_YESNO | MB_ICONWARNING | MB_TOPMOST
         );
 

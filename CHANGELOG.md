@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.1
+
+Version-checker release.
+
+- Updated the built-in version checker to read from `https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/refs/heads/main/latest`.
+- Updated the installed version to `0.1.1`.
+- Updated the download URL to the `mctde-Link` GitHub releases page.
+
 ## v0.1.0
 
 First full release candidate.

@@ -1,17 +1,29 @@
-# mctde-Link v0.1.1
+# VersionChecker Expansion
 
-This release updates the built-in version checker and keeps the release package layout unchanged.
+## Patch Notes
 
-## Changed
-
-- Version checker now reads the latest version from:
+- Expanded the built-in version checker to check both `mctde` and `mctde-link`.
+- `latest.txt` now uses explicit key/value rows:
 
 ```text
-https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/refs/heads/main/latest
+mctde=0.88
+mctde-link=0.1.1
 ```
 
-- Installed version is now `0.1.1`.
-- Update prompt now opens the `mctde-Link` GitHub releases page.
+- If mctde is out of date, the prompt says `mctde is out of date. Would you like to update?` and Yes opens:
+
+```text
+https://www.nexusmods.com/darksouls/mods/1926
+```
+
+- If only mctde-link is out of date, the prompt says `mctde-link is out of date. Would you like to update?` and Yes opens:
+
+```text
+https://github.com/McRoodyPoo/mctde-Link/releases
+```
+
+- If both are out of date, the mctde prompt takes priority and Yes opens the Nexus Mods mctde page.
+- Pressing No on an update prompt closes Dark Souls.
 
 ## Included
 

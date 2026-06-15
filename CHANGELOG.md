@@ -1,12 +1,12 @@
 # Changelog
 
-## v0.1.1
+## v0.1.1 - VersionChecker Expansion
 
-Version-checker release.
-
-- Updated the built-in version checker to read from `https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/refs/heads/main/latest`.
-- Updated the installed version to `0.1.1`.
-- Updated the download URL to the `mctde-Link` GitHub releases page.
+- Expanded the built-in version checker to read both `mctde` and `mctde-link` versions from `latest.txt`.
+- Set bundled version values to `mctde=0.88` and `mctde-link=0.1.1`.
+- Added separate update prompts and download targets for mctde and mctde-link.
+- Prioritized the mctde update prompt when both mctde and mctde-link are out of date.
+- Changed the No button behavior on update prompts to close Dark Souls.
 
 ## v0.1.0
 

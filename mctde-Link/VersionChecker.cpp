@@ -6,21 +6,26 @@
 #include <string>
 #include <fstream>
 #include <cstring>
+#include <sstream>
+#include <vector>
+#include <cstdlib>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
 
-// Your installed mod version.
-// Change this every time you release a new version.
-#define CURRENT_VERSION "0.1.1"
+// Installed versions bundled with this release.
+// Change these every time you release a new version.
+#define CURRENT_MCTDE_VERSION "0.88"
+#define CURRENT_MCTDE_LINK_VERSION "0.1.1"
 
 // Your GitHub raw file info.
 // Full URL:
-// https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/refs/heads/main/latest
+// https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/refs/heads/main/latest.txt
 #define VERSION_HOST L"raw.githubusercontent.com"
-#define VERSION_PATH L"/McRoodyPoo/mctde-Link/refs/heads/main/latest"
+#define VERSION_PATH L"/McRoodyPoo/mctde-Link/refs/heads/main/latest.txt"
 
-#define DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases/latest"
+#define MCTDE_DOWNLOAD_URL "https://www.nexusmods.com/darksouls/mods/1926"
+#define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases"
 
 static bool g_versionLoggingConfigured = false;
 static bool g_versionLoggingEnabled = false;
@@ -39,6 +44,166 @@ std::string Trim(const std::string& text)
     }
 
     return text.substr(start, end - start + 1);
+}
+
+static std::string NormalizeVersionKey(const std::string& text)
+{
+    std::string result = Trim(text);
+
+    for (size_t i = 0; i < result.size(); i++)
+    {
+        char c = result[i];
+
+        if (c >= 'A' && c <= 'Z')
+        {
+            result[i] = static_cast<char>(c - 'A' + 'a');
+        }
+        else if (c == '_')
+        {
+            result[i] = '-';
+        }
+    }
+
+    return result;
+}
+
+static bool IsDigitsOnly(const std::string& text)
+{
+    if (text.empty())
+    {
+        return false;
+    }
+
+    for (size_t i = 0; i < text.size(); i++)
+    {
+        if (text[i] < '0' || text[i] > '9')
+        {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool ParseVersionParts(const std::string& version, std::vector<int>& parts)
+{
+    parts.clear();
+
+    std::stringstream stream(Trim(version));
+    std::string part;
+
+    while (std::getline(stream, part, '.'))
+    {
+        part = Trim(part);
+
+        if (!IsDigitsOnly(part))
+        {
+            return false;
+        }
+
+        parts.push_back(atoi(part.c_str()));
+    }
+
+    return !parts.empty();
+}
+
+static int CompareVersions(const std::string& left, const std::string& right)
+{
+    std::vector<int> leftParts;
+    std::vector<int> rightParts;
+
+    if (!ParseVersionParts(left, leftParts) || !ParseVersionParts(right, rightParts))
+    {
+        return Trim(left) == Trim(right) ? 0 : 1;
+    }
+
+    size_t count = leftParts.size() > rightParts.size() ? leftParts.size() : rightParts.size();
+
+    for (size_t i = 0; i < count; i++)
+    {
+        int leftValue = i < leftParts.size() ? leftParts[i] : 0;
+        int rightValue = i < rightParts.size() ? rightParts[i] : 0;
+
+        if (leftValue > rightValue)
+        {
+            return 1;
+        }
+
+        if (leftValue < rightValue)
+        {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static bool IsOutOfDate(const std::string& latestVersion, const std::string& installedVersion)
+{
+    if (Trim(latestVersion).empty())
+    {
+        return false;
+    }
+
+    return CompareVersions(latestVersion, installedVersion) > 0;
+}
+
+struct LatestVersions
+{
+    std::string mctde;
+    std::string mctdeLink;
+};
+
+static LatestVersions ParseLatestVersions(const std::string& text)
+{
+    LatestVersions versions;
+    std::stringstream stream(text);
+    std::string line;
+
+    while (std::getline(stream, line))
+    {
+        size_t comment = line.find('#');
+        if (comment != std::string::npos)
+        {
+            line = line.substr(0, comment);
+        }
+
+        line = Trim(line);
+        if (line.empty())
+        {
+            continue;
+        }
+
+        size_t separator = line.find('=');
+        if (separator == std::string::npos)
+        {
+            separator = line.find(':');
+        }
+
+        if (separator == std::string::npos)
+        {
+            if (versions.mctdeLink.empty())
+            {
+                versions.mctdeLink = line;
+            }
+
+            continue;
+        }
+
+        std::string key = NormalizeVersionKey(line.substr(0, separator));
+        std::string value = Trim(line.substr(separator + 1));
+
+        if (key == "mctde")
+        {
+            versions.mctde = value;
+        }
+        else if (key == "mctde-link" || key == "mctdelink")
+        {
+            versions.mctdeLink = value;
+        }
+    }
+
+    return versions;
 }
 
 static std::string GetDllDirectory()
@@ -110,9 +275,9 @@ void WriteLog(const std::string& message)
 }
 
 // ------------------------------------------------------------
-// Downloads the latest version number from GitHub.
+// Downloads the latest version manifest from GitHub.
 // ------------------------------------------------------------
-std::string DownloadLatestVersion()
+std::string DownloadLatestManifest()
 {
     std::string result;
 
@@ -263,52 +428,81 @@ DWORD WINAPI VersionCheckThread(LPVOID)
     WriteLog("----------------------------------------");
     WriteLog("Version checker started.");
 
-    std::string currentVersion = CURRENT_VERSION;
-    std::string latestVersion = DownloadLatestVersion();
+    std::string latestManifest = DownloadLatestManifest();
 
-    if (latestVersion.empty())
+    if (latestManifest.empty())
     {
-        WriteLog("Could not check latest version.");
+        WriteLog("Could not check latest version manifest.");
         return 0;
     }
 
-    WriteLog("Installed version: " + currentVersion);
-    WriteLog("Latest version: " + latestVersion);
+    LatestVersions latestVersions = ParseLatestVersions(latestManifest);
 
-    if (latestVersion != currentVersion)
+    WriteLog("Installed mctde version: " + std::string(CURRENT_MCTDE_VERSION));
+    WriteLog("Latest mctde version: " + latestVersions.mctde);
+    WriteLog("Installed mctde-link version: " + std::string(CURRENT_MCTDE_LINK_VERSION));
+    WriteLog("Latest mctde-link version: " + latestVersions.mctdeLink);
+
+    bool mctdeOutOfDate = IsOutOfDate(latestVersions.mctde, CURRENT_MCTDE_VERSION);
+    bool linkOutOfDate = IsOutOfDate(latestVersions.mctdeLink, CURRENT_MCTDE_LINK_VERSION);
+
+    if (!mctdeOutOfDate && !linkOutOfDate)
     {
-        WriteLog("Update available.");
+        WriteLog("mctde and mctde-Link are up to date.");
+        return 0;
+    }
 
-        std::string popupMessage =
-            "A new version of mctde-Link is available.\n\n"
-            "Installed version: " + currentVersion + "\n"
-            "Latest version: " + latestVersion + "\n\n"
-            "You can keep playing, but you may run into bugs that have already been fixed.\n\n"
-            "Open the download page now?";
+    const char* downloadUrl = MCTDE_LINK_DOWNLOAD_URL;
+    const char* title = "mctde-link Update Required";
+    std::string popupMessage;
 
-        int result = MessageBoxA(
-            NULL,
-            popupMessage.c_str(),
-            "mctde-Link Update Available",
-            MB_YESNO | MB_ICONWARNING | MB_TOPMOST
-        );
+    if (mctdeOutOfDate)
+    {
+        WriteLog("mctde update available.");
 
-        if (result == IDYES)
-        {
-            ShellExecuteA(
-                NULL,
-                "open",
-                DOWNLOAD_URL,
-                NULL,
-                NULL,
-                SW_SHOWNORMAL
-            );
-        }
+        downloadUrl = MCTDE_DOWNLOAD_URL;
+        title = "mctde Update Required";
+        popupMessage =
+            "mctde is out of date. Would you like to update?\n\n"
+            "Installed mctde version: " + std::string(CURRENT_MCTDE_VERSION) + "\n"
+            "Latest mctde version: " + latestVersions.mctde + "\n\n"
+            "Dark Souls will close if you choose No.";
     }
     else
     {
-        WriteLog("Mod is up to date.");
+        WriteLog("mctde-link update available.");
+
+        popupMessage =
+            "mctde-link is out of date. Would you like to update?\n\n"
+            "Installed mctde-link version: " + std::string(CURRENT_MCTDE_LINK_VERSION) + "\n"
+            "Latest mctde-link version: " + latestVersions.mctdeLink + "\n\n"
+            "Dark Souls will close if you choose No.";
     }
+
+    int result = MessageBoxA(
+        NULL,
+        popupMessage.c_str(),
+        title,
+        MB_YESNO | MB_ICONWARNING | MB_TOPMOST
+    );
+
+    if (result == IDYES)
+    {
+        ShellExecuteA(
+            NULL,
+            "open",
+            downloadUrl,
+            NULL,
+            NULL,
+            SW_SHOWNORMAL
+        );
+
+        return 0;
+    }
+
+    WriteLog("User declined required update. Closing Dark Souls.");
+    TerminateProcess(GetCurrentProcess(), 0);
+    ExitProcess(0);
 
     return 0;
 }

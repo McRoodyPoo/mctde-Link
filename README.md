@@ -11,10 +11,7 @@
 - Compact PvP roster overlay showing player HP, names, ping, and role/color styling.
 - True-ping side channel for compatible peers running `mctde-Link`.
 - Cached/session ping fallback for players who are not running the DLL when Steam or the game exposes usable ping data.
-- Ping source clarity through source markers, so cached values can be distinguished from true-ping values.
-- HP display using PTDE/Ashley-style offsets, with configurable current/max HP offsets for advanced setups.
-- Stable row behavior that keeps the last good HP, name, and ping values visible until a valid replacement exists.
-- Name stability for confirmed roster rows, reducing distracting identity flicker during missed reads.
+- HP display using PTDE/Ashley-style offsets.
 - Optional local OBS/browser overlay served from `127.0.0.1` for stream layouts, recording, or tournament capture.
 - Compatibility hub behavior through `GenericDLL` entries and optional chainload folder support for other PTDE tools.
 - Returned-home/session popup suppression to reduce match-flow noise.
@@ -22,8 +19,6 @@
 
 ## Quality of Life
 
-- Logging is off by default, so normal play does not generate noisy log files unless you explicitly enable diagnostics.
-- True ping defaults to a reserved side channel instead of game-facing channels, reducing the chance of interfering with PTDE traffic.
 - Display smoothing/floor sampling is configurable for players who want stable ping reads instead of frame-to-frame jitter.
 - HP polling, 1 HP linger timing, and overlay refresh behavior are configurable for different setups.
 - The overlay can be anchored to any corner and tuned with padding, font, and row spacing controls.

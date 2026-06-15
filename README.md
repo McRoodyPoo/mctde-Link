@@ -48,17 +48,17 @@ To enable Phantom Break with `mctde-Link`:
 
 ```ini
 [DLLs]
-GenericDLL0=PhantomBreak.dll
+GenericDLL0=Phantom_Break.dll
 ```
 
 If the DLL is not in the PTDE `DATA` folder, use the full path instead:
 
 ```ini
 [DLLs]
-GenericDLL0=C:\Path\To\PhantomBreak.dll
+GenericDLL0=C:\Path\To\Phantom_Break.dll
 ```
 
-Use the first empty `GenericDLL` slot if `GenericDLL0` is already used.
+Use the first empty `GenericDLL` slot if `GenericDLL0` is already used. If your copy has a different filename, use that exact filename in the `GenericDLL` entry.
 
 To disable Phantom Break, blank its `GenericDLL` entry in `mctde-link.ini`:
 

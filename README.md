@@ -172,7 +172,7 @@ This project/library was built with reference to community Dark Souls: Prepare t
 
 ## Special Thanks
 
-Special thanks to **Ashley**, **MetalCrow**, **Sean Pesce** **Eloise**, **Dasmins**, JKAnderson, Wulf2k, Chronial, Peter “Durante” Thoman, Grimrukh, and the broader Dark Souls modding and reverse-engineering community.
+Special thanks to **Ashley**, **MetalCrow**, **Sean Pesce** **Eloise**, **Dasmins**, **Alax**, JKAnderson, Wulf2k, Chronial, Peter “Durante” Thoman, Grimrukh, and the broader Dark Souls modding and reverse-engineering community.
 
 Original game by **FromSoftware** and **Bandai Namco**.
 ```

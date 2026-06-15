@@ -20,9 +20,9 @@
 
 // Your GitHub raw file info.
 // Full URL:
-// https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/refs/heads/main/latest.txt
+// https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/latest.txt
 #define VERSION_HOST L"raw.githubusercontent.com"
-#define VERSION_PATH L"/McRoodyPoo/mctde-Link/refs/heads/main/latest.txt"
+#define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/latest.txt"
 
 #define MCTDE_DOWNLOAD_URL "https://www.nexusmods.com/darksouls/mods/1926"
 #define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases"

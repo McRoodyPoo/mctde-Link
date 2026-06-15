@@ -9,7 +9,7 @@
 ## Features
 
 - Compact PvP roster overlay showing player HP, names, ping, and role/color styling.
-- True-ping side channel for compatible peers running `mctde-Link`.
+- Live ping via Steam side channel for compatible peers running `mctde-Link`.
 - Cached/session ping fallback for players who are not running the DLL when Steam or the game exposes usable ping data.
 - HP display using PTDE/Ashley-style offsets.
 - Optional local OBS/browser overlay served from `127.0.0.1` for stream layouts, recording, or tournament capture.

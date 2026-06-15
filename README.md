@@ -164,14 +164,14 @@ Here’s the paste-ready version with links included.
 
 This project/library was built with reference to community Dark Souls: Prepare to Die Edition modding and reverse-engineering work, including:
 
-* [DS Gadget](https://github.com/JKAnderson/DS-Gadget) by JKAnderson; runtime memory tooling and PTDE testing reference.
-* [PTDE Practice Tool](https://github.com/veeenu/ptde_practice_tool); practice/debug tooling and PTDE hook/reference work.
-* [DSCM / DaS-PC-MPChan](https://github.com/metal-crow/DaS-PC-MPChan); multiplayer/network tooling reference.
-* [DSCM-Net server](https://github.com/Chronial/dscm-server); network backend reference for DSCM.
-* [dsfix](https://github.com/PeterTh/dsfix); PTDE compatibility, rendering, and DLL-loading reference.
-* [Cheat Engine](https://cheatengine.org/); memory inspection and Cheat Engine table research.
-* [Ghidra](https://github.com/NationalSecurityAgency/ghidra); executable analysis and reverse-engineering work.
-* [Dark-Souls-1-Overhaul](https://github.com/metal-crow/Dark-Souls-1-Overhaul); Phantom_Break.dll compatibility/network reference.
+- DS Gadget by JKAnderson; runtime memory tooling and PTDE testing reference: <https://github.com/JKAnderson/DS-Gadget>
+- PTDE Practice Tool; practice/debug tooling and PTDE hook/reference work: <https://github.com/veeenu/ptde_practice_tool>
+- DSCM / DaS-PC-MPChan; multiplayer/network tooling reference: <https://github.com/metal-crow/DaS-PC-MPChan>
+- DSCM-Net server; network backend reference for DSCM: <https://github.com/Chronial/dscm-server>
+- dsfix; PTDE compatibility, rendering, and DLL-loading reference: <https://github.com/PeterTh/dsfix>
+- Cheat Engine; memory inspection and Cheat Engine table research: <https://cheatengine.org/>
+- Ghidra; executable analysis and reverse-engineering work: <https://github.com/NationalSecurityAgency/ghidra>
+- Dark-Souls-1-Overhaul; Phantom_Break.dll compatibility/network reference: <https://github.com/metal-crow/Dark-Souls-1-Overhaul>
 
 ## Special Thanks
 

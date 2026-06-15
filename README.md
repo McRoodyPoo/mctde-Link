@@ -157,9 +157,6 @@ docs/                   INI reference, compatibility notes, and patch history
 samples/                Example INI files
 ```
 
-```text
-Here’s the paste-ready version with links included.
-
 ## Bibliography
 
 This project/library was built with reference to community Dark Souls: Prepare to Die Edition modding and reverse-engineering work, including:

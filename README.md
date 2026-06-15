@@ -2,6 +2,34 @@
 
 `mctde-Link` is a `d3d9.dll` proxy for Dark Souls: Prepare to Die Edition. It loads from the game `DATA` folder and provides the MCTDE network overlay, HP display, true-ping side channel, compatibility chainloading, and popup suppression used by the PTDE multiplayer tooling setup.
 
+## Built for PTDE PvP
+
+`mctde-Link` is meant for competition-grade PTDE PvP sessions where every player slot, HP read, and latency swing matters. The overlay is intentionally compact: it gives you matchup-critical information without turning the game screen into a dashboard.
+
+## Features
+
+- Compact PvP roster overlay showing player HP, names, ping, and role/color styling.
+- True-ping side channel for compatible peers running `mctde-Link`.
+- Cached/session ping fallback for players who are not running the DLL when Steam or the game exposes usable ping data.
+- Ping source clarity through source markers, so cached values can be distinguished from true-ping values.
+- HP display using PTDE/Ashley-style offsets, with configurable current/max HP offsets for advanced setups.
+- Stable row behavior that keeps the last good HP, name, and ping values visible until a valid replacement exists.
+- Name stability for confirmed roster rows, reducing distracting identity flicker during missed reads.
+- Optional local OBS/browser overlay served from `127.0.0.1` for stream layouts, recording, or tournament capture.
+- Compatibility hub behavior through `GenericDLL` entries and optional chainload folder support for other PTDE tools.
+- Returned-home/session popup suppression to reduce match-flow noise.
+- INI-driven controls for overlay position, font, line height, local-player hiding, HP polling, true-ping behavior, WebSocket output, debug logging, and compatibility DLL loading.
+
+## Quality of Life
+
+- Logging is off by default, so normal play does not generate noisy log files unless you explicitly enable diagnostics.
+- True ping defaults to a reserved side channel instead of game-facing channels, reducing the chance of interfering with PTDE traffic.
+- Display smoothing/floor sampling is configurable for players who want stable ping reads instead of frame-to-frame jitter.
+- HP polling, 1 HP linger timing, and overlay refresh behavior are configurable for different setups.
+- The overlay can be anchored to any corner and tuned with padding, font, and row spacing controls.
+- The local player row can be hidden when you only care about opponents and partners.
+- Debug options are split out so troubleshooting can be enabled without permanently making the release config noisy.
+
 ## Install
 
 This repository is source code only. For normal installation, download the latest release zip from GitHub Releases.

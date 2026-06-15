@@ -156,3 +156,26 @@ mctde-Link/             Source and project files
 docs/                   INI reference, compatibility notes, and patch history
 samples/                Example INI files
 ```
+
+```text
+Here’s the paste-ready version with links included.
+
+## Bibliography
+
+This project/library was built with reference to community Dark Souls: Prepare to Die Edition modding and reverse-engineering work, including:
+
+* [DS Gadget](https://github.com/JKAnderson/DS-Gadget) by JKAnderson; runtime memory tooling and PTDE testing reference.
+* [PTDE Practice Tool](https://github.com/veeenu/ptde_practice_tool); practice/debug tooling and PTDE hook/reference work.
+* [DSCM / DaS-PC-MPChan](https://github.com/metal-crow/DaS-PC-MPChan); multiplayer/network tooling reference.
+* [DSCM-Net server](https://github.com/Chronial/dscm-server); network backend reference for DSCM.
+* [dsfix](https://github.com/PeterTh/dsfix); PTDE compatibility, rendering, and DLL-loading reference.
+* [Cheat Engine](https://cheatengine.org/); memory inspection and Cheat Engine table research.
+* [Ghidra](https://github.com/NationalSecurityAgency/ghidra); executable analysis and reverse-engineering work.
+* [Dark-Souls-1-Overhaul](https://github.com/metal-crow/Dark-Souls-1-Overhaul); Phantom_Break.dll compatibility/network reference.
+
+## Special Thanks
+
+Special thanks to **Ashley**, **MetalCrow**, **Sean Pesce** **Eloise**, **Dasmins**, JKAnderson, Wulf2k, Chronial, Peter “Durante” Thoman, Grimrukh, and the broader Dark Souls modding and reverse-engineering community.
+
+Original game by **FromSoftware** and **Bandai Namco**.
+```

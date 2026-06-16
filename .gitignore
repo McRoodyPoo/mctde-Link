@@ -31,6 +31,9 @@ x86/
 MCTDE_NetOverlay_*.log
 VersionCheck.log
 
+# Companion build output
+companion/bin/
+
 # Archives
 *.zip
 *.7z

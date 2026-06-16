@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <vector>
 #include <algorithm>
+#include "D3DOverlay.h"
 
 #ifdef MCTDE_LINK_SINGLE_DLL
 extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule);
@@ -598,7 +599,10 @@ extern "C" void* WINAPI Direct3DCreate9(UINT SDKVersion)
     void* result = g_realDirect3DCreate9(SDKVersion);
 
     if (result)
+    {
         WriteHubLog("Direct3DCreate9 succeeded.");
+        D3DOverlay_HookFactory(result, false);
+    }
     else
         WriteHubLog("Direct3DCreate9 returned NULL.");
 
@@ -619,7 +623,11 @@ extern "C" HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, void** ppD3D)
     HRESULT result = g_realDirect3DCreate9Ex(SDKVersion, ppD3D);
 
     if (SUCCEEDED(result))
+    {
         WriteHubLog("Direct3DCreate9Ex succeeded.");
+        if (ppD3D && *ppD3D)
+            D3DOverlay_HookFactory(*ppD3D, true);
+    }
     else
         WriteHubLog("Direct3DCreate9Ex failed.");
 

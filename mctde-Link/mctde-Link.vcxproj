@@ -86,12 +86,14 @@
   <ItemGroup>
     <ClInclude Include="framework.h" />
     <ClInclude Include="pch.h" />
+    <ClInclude Include="D3DOverlay.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="MCTDE_NetOverlay.cpp" />
     <ClCompile Include="VersionChecker.cpp" />
     <ClCompile Include="pch.cpp" />
+    <ClCompile Include="D3DOverlay.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="d3d9.def" />

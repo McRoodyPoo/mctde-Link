@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.2 - Performance Upgrade
+
+- Fixed the overlay causing frametime stutter.
+- Overlay now draws in-game instead of as a separate window.
+- Now works properly with DSFix.
+
 ## v0.1.1 - VersionChecker Expansion
 
 - Expanded the built-in version checker to read both `mctde` and `mctde-link` versions from `latest.txt`.

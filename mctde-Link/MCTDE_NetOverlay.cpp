@@ -8,6 +8,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <d3d9.h>
+#include "D3DOverlay.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -326,6 +327,21 @@ static const int MAX_TRACKED_PLAYER_NO = 32;
 static PlayerIdentity g_identityByPlayerNo[MAX_TRACKED_PLAYER_NO];
 
 static int g_refreshMs = 1000;
+// Render backend: 0 = legacy GDI layered window, 1 = in-frame Direct3D9 overlay.
+static int g_renderBackend = 0;
+static int g_d3dSubmitMs = 66; // how often the D3D backend rasterizes + submits a new bitmap
+static int g_repaintMs = 66;   // GDI-window repaint interval (lower = smoother but more DWM cost)
+
+// Cached GDI window resources/state so we stop recreating them every paint.
+static HFONT g_winSmallFont = NULL;
+static HFONT g_winHpFont = NULL;
+static int   g_winFontHeightCached = -1;
+static int   g_winHpFontHeightCached = -1;
+static char  g_winFontFaceCached[64] = "";
+static FILETIME g_iniLastWrite = { 0, 0 };
+static bool  g_iniLastWriteValid = false;
+static bool  g_overlayStyleApplied = false;
+static RECT  g_lastOverlayRect = { -1, -1, -1, -1 };
 static int g_paddingX = 18;
 static int g_paddingY = 18;
 static int g_fontHeight = 16;
@@ -927,6 +943,34 @@ static void LoadConfig(bool logIt)
     g_refreshMs = GetPrivateProfileIntA("Overlay", "RefreshMs", 1000, g_iniPath);
     if (g_refreshMs < 250)
         g_refreshMs = 250;
+
+    // [Render] Backend = gdi (legacy layered window) | d3d (in-frame Direct3D9 overlay)
+    {
+        char backend[32];
+        ZeroMemory(backend, sizeof(backend));
+        GetPrivateProfileStringA("Render", "Backend", "gdi", backend, sizeof(backend), g_iniPath);
+        TrimString(backend);
+        g_renderBackend = (lstrcmpiA(backend, "d3d") == 0) ? 1 : 0;
+
+        g_d3dSubmitMs = GetPrivateProfileIntA("Render", "SubmitMs", 66, g_iniPath);
+        if (g_d3dSubmitMs < 16)  g_d3dSubmitMs = 16;
+        if (g_d3dSubmitMs > 500) g_d3dSubmitMs = 500;
+
+        // GDI-window repaint interval. 66ms (~15Hz) is plenty for ping/HP text and
+        // cuts DWM recomposition ~4x vs the old 16ms (60Hz) timer.
+        g_repaintMs = GetPrivateProfileIntA("Render", "RepaintMs", 66, g_iniPath);
+        if (g_repaintMs < 16)   g_repaintMs = 16;
+        if (g_repaintMs > 1000) g_repaintMs = 1000;
+
+        // DrawAt = present (after DSFix post; robust) | endscene (fallback)
+        char drawAt[32];
+        ZeroMemory(drawAt, sizeof(drawAt));
+        GetPrivateProfileStringA("Render", "DrawAt", "present", drawAt, sizeof(drawAt), g_iniPath);
+        TrimString(drawAt);
+        D3DOverlay_SetDrawAtPresent(lstrcmpiA(drawAt, "endscene") != 0);
+
+        D3DOverlay_SetEnabled(g_renderBackend == 1);
+    }
 
     GetPrivateProfileStringA("Overlay", "FontFace", "Tahoma", g_fontFace, sizeof(g_fontFace), g_iniPath);
     TrimString(g_fontFace);
@@ -4629,30 +4673,35 @@ static void UpdateOverlayPosition()
         return;
     }
 
-    DWORD exStyle = GetWindowLongA(g_overlayWnd, GWL_EXSTYLE);
-    exStyle |= WS_EX_LAYERED;
-    exStyle |= WS_EX_TRANSPARENT;
-    exStyle |= WS_EX_TOOLWINDOW;
-    exStyle |= WS_EX_NOACTIVATE;
+    // Apply the window styles + colour-key once (they never change at runtime). Doing
+    // this every timer tick forced needless window-manager work and recomposition.
+    if (!g_overlayStyleApplied)
+    {
+        DWORD exStyle = GetWindowLongA(g_overlayWnd, GWL_EXSTYLE);
+        exStyle |= WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        if (g_forceTopmost) exStyle |= WS_EX_TOPMOST; else exStyle &= ~WS_EX_TOPMOST;
+        SetWindowLongA(g_overlayWnd, GWL_EXSTYLE, exStyle);
+        SetLayeredWindowAttributes(g_overlayWnd, OVERLAY_TRANSPARENT_KEY, 255, LWA_COLORKEY);
+        MakeOverlayOwnedByGame();
+        g_overlayStyleApplied = true;
+    }
 
-    if (g_forceTopmost)
-        exStyle |= WS_EX_TOPMOST;
-    else
-        exStyle &= ~WS_EX_TOPMOST;
-
-    SetWindowLongA(g_overlayWnd, GWL_EXSTYLE, exStyle);
-    SetLayeredWindowAttributes(g_overlayWnd, OVERLAY_TRANSPARENT_KEY, 255, LWA_COLORKEY);
-    MakeOverlayOwnedByGame();
-
-    SetWindowPos(
-        g_overlayWnd,
-        g_forceTopmost ? HWND_TOPMOST : HWND_TOP,
-        topLeft.x,
-        topLeft.y,
-        width,
-        height,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_FRAMECHANGED
-    );
+    // Only move/resize when the target actually changed — and never with SWP_FRAMECHANGED,
+    // which forced a non-client recalc + recomposition on every tick.
+    if (topLeft.x != g_lastOverlayRect.left || topLeft.y != g_lastOverlayRect.top ||
+        width != g_lastOverlayRect.right || height != g_lastOverlayRect.bottom)
+    {
+        SetWindowPos(
+            g_overlayWnd,
+            g_forceTopmost ? HWND_TOPMOST : HWND_TOP,
+            topLeft.x, topLeft.y, width, height,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW
+        );
+        g_lastOverlayRect.left = topLeft.x;
+        g_lastOverlayRect.top = topLeft.y;
+        g_lastOverlayRect.right = width;
+        g_lastOverlayRect.bottom = height;
+    }
 }
 
 static void DrawTextShadow(HDC hdc, int x, int y, COLORREF color, const char* text)
@@ -4888,11 +4937,61 @@ static void FormatFixedField(char* out, int outSize, int value, int width, const
     out[pos] = 0;
 }
 
+// Returns true only when the INI's last-write time has changed since the last check
+// (so we reload config on demand instead of opening/parsing the file every paint).
+static bool IniChanged()
+{
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (!GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &fa))
+        return false;
+    if (!g_iniLastWriteValid || CompareFileTime(&fa.ftLastWriteTime, &g_iniLastWrite) != 0)
+    {
+        g_iniLastWrite = fa.ftLastWriteTime;
+        g_iniLastWriteValid = true;
+        return true;
+    }
+    return false;
+}
+
+// (Re)create the overlay fonts only when their parameters actually change, instead of
+// calling CreateFontA/DeleteObject on every paint.
+static void EnsureWindowFonts()
+{
+    if (g_winSmallFont && g_winHpFont &&
+        g_winFontHeightCached == g_fontHeight &&
+        g_winHpFontHeightCached == g_hpFontHeight &&
+        lstrcmpA(g_winFontFaceCached, g_fontFace) == 0)
+        return;
+
+    if (g_winSmallFont) { DeleteObject(g_winSmallFont); g_winSmallFont = NULL; }
+    if (g_winHpFont)    { DeleteObject(g_winHpFont);    g_winHpFont = NULL; }
+
+    g_winSmallFont = CreateFontA(g_fontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, g_fontFace);
+    if (!g_winSmallFont)
+        g_winSmallFont = CreateFontA(g_fontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Tahoma");
+
+    g_winHpFont = CreateFontA(g_hpFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, g_fontFace);
+    if (!g_winHpFont)
+        g_winHpFont = CreateFontA(g_hpFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Tahoma");
+
+    g_winFontHeightCached = g_fontHeight;
+    g_winHpFontHeightCached = g_hpFontHeight;
+    lstrcpynA(g_winFontFaceCached, g_fontFace, sizeof(g_winFontFaceCached));
+}
+
 static void PaintOverlay(HWND hwnd)
 {
-    LONG reload = InterlockedIncrement(&g_configReloadCounter);
-    bool logConfig = (reload <= 3 || (reload % 40) == 0);
-    LoadConfig(logConfig);
+    if (IniChanged())
+        LoadConfig(true);
+    EnsureWindowFonts();
 
     PAINTSTRUCT ps;
     HDC paintHdc = BeginPaint(hwnd, &ps);
@@ -4923,35 +5022,9 @@ static void PaintOverlay(HWND hwnd)
 
     SetBkMode(hdc, TRANSPARENT);
 
-    HFONT smallFont = CreateFontA(
-        g_fontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, g_fontFace
-    );
-
-    if (smallFont == NULL)
-    {
-        smallFont = CreateFontA(
-            g_fontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Tahoma"
-        );
-    }
-
-    HFONT hpFont = CreateFontA(
-        g_hpFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, g_fontFace
-    );
-
-    if (hpFont == NULL)
-    {
-        hpFont = CreateFontA(
-            g_hpFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Tahoma"
-        );
-    }
+    // Cached fonts (created once / on config change) — see EnsureWindowFonts().
+    HFONT smallFont = g_winSmallFont;
+    HFONT hpFont = g_winHpFont;
 
     HFONT oldFont = (HFONT)SelectObject(hdc, smallFont);
 
@@ -5015,9 +5088,7 @@ static void PaintOverlay(HWND hwnd)
 
     if (totalLines < 1)
     {
-        SelectObject(hdc, oldFont);
-        DeleteObject(smallFont);
-        DeleteObject(hpFont);
+        SelectObject(hdc, oldFont); // fonts are cached; do not delete
         if (hdc == backHdc)
         {
             BitBlt(paintHdc, 0, 0, paintWidth, paintHeight, backHdc, 0, 0, SRCCOPY);
@@ -5110,9 +5181,7 @@ static void PaintOverlay(HWND hwnd)
         y += lineHeight;
     }
 
-    SelectObject(hdc, oldFont);
-    DeleteObject(smallFont);
-    DeleteObject(hpFont);
+    SelectObject(hdc, oldFont); // fonts are cached; do not delete
 
     if (hdc == backHdc)
     {
@@ -6108,9 +6177,229 @@ static DWORD WINAPI HpPollThread(LPVOID)
     return 0;
 }
 
+// ------------------------------------------------------------
+// Direct3D backend: rasterize the same rows into a tight 32-bit BGRA bitmap
+// (reusing the exact GDI text/outline drawing) and hand it to D3DOverlay, which
+// draws it as a single in-frame quad. No window, no DWM composition.
+// ------------------------------------------------------------
+static void RenderOverlayToDIBAndSubmit()
+{
+    std::vector<OverlayRow> rows;
+    if (g_rowsLockReady)
+    {
+        EnterCriticalSection(&g_rowsLock);
+        rows = g_rows;
+        LeaveCriticalSection(&g_rowsLock);
+    }
+
+    {
+        static int s_lastRowCount = -1;
+        if ((int)rows.size() != s_lastRowCount)
+        {
+            WriteLogf("[mctde-d3d] submit rows %d -> %d", s_lastRowCount, (int)rows.size());
+            s_lastRowCount = (int)rows.size();
+        }
+    }
+
+    if (rows.empty())
+    {
+        D3DOverlay_Submit(NULL, 0, 0, (int)g_corner, g_paddingX, g_paddingY);
+        return;
+    }
+
+    HFONT smallFont = CreateFontA(
+        g_fontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, g_fontFace);
+    if (smallFont == NULL)
+        smallFont = CreateFontA(g_fontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Tahoma");
+
+    HFONT hpFont = CreateFontA(
+        g_hpFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+        ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, g_fontFace);
+    if (hpFont == NULL)
+        hpFont = CreateFontA(g_hpFontHeight, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+            ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            NONANTIALIASED_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Tahoma");
+
+    HDC screenDC = GetDC(NULL);
+    HDC hdc = CreateCompatibleDC(screenDC);
+
+    HFONT oldFont = (HFONT)SelectObject(hdc, hpFont);
+    TEXTMETRICA hpTm; ZeroMemory(&hpTm, sizeof(hpTm));
+    GetTextMetricsA(hdc, &hpTm);
+    SIZE hpMaxSize; ZeroMemory(&hpMaxSize, sizeof(hpMaxSize));
+    GetTextExtentPoint32A(hdc, "9999HP", 6, &hpMaxSize);
+
+    SelectObject(hdc, smallFont);
+    TEXTMETRICA smallTm; ZeroMemory(&smallTm, sizeof(smallTm));
+    GetTextMetricsA(hdc, &smallTm);
+    SIZE markerMaxSize; ZeroMemory(&markerMaxSize, sizeof(markerMaxSize));
+    GetTextExtentPoint32A(hdc, "999MS(C)", 8, &markerMaxSize);
+    SIZE localMarkerMaxSize; ZeroMemory(&localMarkerMaxSize, sizeof(localMarkerMaxSize));
+    GetTextExtentPoint32A(hdc, "\\[T]/", 5, &localMarkerMaxSize);
+    if (localMarkerMaxSize.cx > markerMaxSize.cx)
+        markerMaxSize.cx = localMarkerMaxSize.cx;
+
+    int lineHeight = g_lineHeight;
+    if (lineHeight < hpTm.tmHeight + 2)
+        lineHeight = hpTm.tmHeight + 2;
+
+    int hpFieldWidth = hpMaxSize.cx + 6;
+    int markerGutterWidth = markerMaxSize.cx + g_markerGutterExtra;
+    int nameX = hpFieldWidth + markerGutterWidth;
+    int totalLines = (int)rows.size();
+    int blockHeight = totalLines * lineHeight;
+
+    // Measure the widest name so the bitmap is sized tightly (no clipping).
+    int maxNameWidth = 0;
+    for (size_t i = 0; i < rows.size(); i++)
+    {
+        const char* nm = rows[i].name.c_str();
+        int len = lstrlenA(nm);
+        if (len <= 0)
+            continue;
+        SIZE ns; ZeroMemory(&ns, sizeof(ns));
+        GetTextExtentPoint32A(hdc, nm, len, &ns);
+        if (ns.cx > maxNameWidth)
+            maxNameWidth = ns.cx;
+    }
+
+    int contentW = nameX + maxNameWidth + 8;
+    int contentH = blockHeight + 2;
+    if (contentW < 1) contentW = 1;
+    if (contentH < 1) contentH = 1;
+
+    // Top-down 32bpp DIB so row 0 is the top scanline.
+    BITMAPINFO bmi;
+    ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = contentW;
+    bmi.bmiHeader.biHeight = -contentH;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = NULL;
+    HBITMAP dib = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+
+    if (dib != NULL && bits != NULL)
+    {
+        HBITMAP oldBmp = (HBITMAP)SelectObject(hdc, dib);
+
+        RECT rcAll = { 0, 0, contentW, contentH };
+        HBRUSH keyBrush = CreateSolidBrush(OVERLAY_TRANSPARENT_KEY);
+        FillRect(hdc, &rcAll, keyBrush);
+        DeleteObject(keyBrush);
+
+        SetBkMode(hdc, TRANSPARENT);
+
+        int x = 0;
+        int y = 0;
+        for (size_t i = 0; i < rows.size(); i++)
+        {
+            const OverlayRow& row = rows[i];
+
+            char pingText[32];
+            char pingSourceText[8];
+            char hpText[32];
+            char hpLine[64];
+            char markerLine[64];
+            const char* nameLine = row.name.c_str();
+
+            if (g_showPing && row.hasPing && row.ping >= 0)
+                FormatFixedField(pingText, sizeof(pingText), row.ping, 3, "---");
+            else
+                lstrcpyA(pingText, "---");
+
+            pingSourceText[0] = 0;
+            if (g_truePingShowSourceMarker && g_showPing && row.hasPing && row.ping >= 0 && !row.hasTruePing && !row.isLocal)
+                lstrcpyA(pingSourceText, "(C)");
+
+            if (g_showHp && row.hasHp && row.hp >= 0)
+                FormatFixedField(hpText, sizeof(hpText), row.hp, 4, "----");
+            else
+                lstrcpyA(hpText, "----");
+
+            wsprintfA(hpLine, "%sHP", hpText);
+            if (row.isLocal)
+                lstrcpyA(markerLine, "\\[T]/");
+            else
+                wsprintfA(markerLine, "%sMS%s", pingText, pingSourceText);
+
+            int hpY = y + ((lineHeight - hpTm.tmHeight) / 2);
+            int smallY = y + ((lineHeight - smallTm.tmHeight) / 2);
+            int markerGutterX = x + hpFieldWidth;
+
+            SelectObject(hdc, hpFont);
+            DrawOverlayHp(hdc, x, hpY, row, hpLine);
+
+            SelectObject(hdc, smallFont);
+            SIZE markerSize; ZeroMemory(&markerSize, sizeof(markerSize));
+            GetTextExtentPoint32A(hdc, markerLine, lstrlenA(markerLine), &markerSize);
+            int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
+
+            DrawOverlayName(hdc, markerX, smallY, row, markerLine);
+            DrawOverlayName(hdc, nameX, smallY, row, nameLine);
+
+            y += lineHeight;
+        }
+
+        GdiFlush();
+
+        // GDI leaves the alpha byte at 0. Convert the color-key to transparent and
+        // make every other pixel opaque, producing valid A8R8G8B8 (0xAARRGGBB).
+        DWORD* px = (DWORD*)bits;
+        int count = contentW * contentH;
+        for (int i = 0; i < count; i++)
+        {
+            DWORD c = px[i];
+            if ((c & 0x00FFFFFF) == 0x00FF00FF) // OVERLAY_TRANSPARENT_KEY = magenta
+                px[i] = 0x00000000;
+            else
+                px[i] = c | 0xFF000000;
+        }
+
+        D3DOverlay_Submit(bits, contentW, contentH, (int)g_corner, g_paddingX, g_paddingY);
+
+        SelectObject(hdc, oldBmp);
+    }
+
+    SelectObject(hdc, oldFont);
+    if (dib) DeleteObject(dib);
+    DeleteObject(smallFont);
+    DeleteObject(hpFont);
+    DeleteDC(hdc);
+    ReleaseDC(NULL, screenDC);
+}
+
+static DWORD WINAPI D3DSubmitThread(LPVOID)
+{
+    WriteLogLine("D3D overlay submit thread started.");
+    int tick = 0;
+    while (g_running)
+    {
+        if ((tick++ % 16) == 0)
+            LoadConfig(false); // refresh config ~1Hz instead of every submit
+        RenderOverlayToDIBAndSubmit();
+        Sleep(g_d3dSubmitMs);
+    }
+    WriteLogLine("D3D overlay submit thread stopped.");
+    return 0;
+}
+
 static DWORD WINAPI OverlayThread(LPVOID)
 {
     WriteLogLine("Overlay thread started.");
+
+    if (g_renderBackend == 1)
+    {
+        WriteLogLine("Overlay backend = d3d (in-frame). Skipping layered window.");
+        return D3DSubmitThread(NULL);
+    }
 
     WNDCLASSEXA wc;
     ZeroMemory(&wc, sizeof(wc));
@@ -6162,7 +6451,7 @@ static DWORD WINAPI OverlayThread(LPVOID)
     WriteLogf("Created overlay window: %08X owner=%08X", (DWORD)g_overlayWnd, (DWORD)g_overlayOwnerWnd);
 
     SetLayeredWindowAttributes(g_overlayWnd, OVERLAY_TRANSPARENT_KEY, 255, LWA_COLORKEY);
-    SetTimer(g_overlayWnd, 1, 16, NULL);
+    SetTimer(g_overlayWnd, 1, (UINT)(g_repaintMs > 0 ? g_repaintMs : 66), NULL);
 
     UpdateOverlayPosition();
     ShowWindow(g_overlayWnd, SW_SHOWNOACTIVATE);
@@ -6260,6 +6549,15 @@ extern "C" void McTDE_NetOverlay_OnProcessDetach()
     g_running = false;
     DisableTruePingTimerPeriod();
     StopWebSocketServer();
+    D3DOverlay_Shutdown();
+}
+
+// Lets the D3D overlay module route diagnostics into the same log file
+// (only writes when [Settings] EnableLogging=1).
+extern "C" void McTDE_NetOverlay_Log(const char* text)
+{
+    if (text)
+        WriteLogLine(text);
 }
 #else
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)

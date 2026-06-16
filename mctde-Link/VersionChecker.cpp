@@ -16,7 +16,7 @@
 // Installed versions bundled with this release.
 // Change these every time you release a new version.
 #define CURRENT_MCTDE_VERSION "0.88"
-#define CURRENT_MCTDE_LINK_VERSION "0.1.1"
+#define CURRENT_MCTDE_LINK_VERSION "0.1.2"
 
 // Your GitHub raw file info.
 // Full URL:
@@ -25,7 +25,7 @@
 #define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/latest.txt"
 
 #define MCTDE_DOWNLOAD_URL "https://www.nexusmods.com/darksouls/mods/1926?tab=files"
-#define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases/download/0.1.1/mctde-Link-0.1.1-release.zip"
+#define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases/download/0.1.2/mctde-Link-0.1.2-release.zip"
 
 static bool g_versionLoggingConfigured = false;
 static bool g_versionLoggingEnabled = false;

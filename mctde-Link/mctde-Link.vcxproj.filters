@@ -15,10 +15,12 @@
     <ClCompile Include="MCTDE_NetOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="VersionChecker.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="pch.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="D3DOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="pch.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="D3DOverlay.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Text Include="d3d9.def"><Filter>Source Files</Filter></Text>

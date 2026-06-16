@@ -13,7 +13,7 @@ The default config uses:
 
 ```ini
 [Compatibility]
-ChainloadFolder=mctde-Link-Chainload
+ChainloadFolder=mctde-Link_Chainload
 ```
 
 Create that folder next to `d3d9.dll` and place compatible DLLs there if needed.

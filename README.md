@@ -52,7 +52,7 @@ If you chainload other DLLs, put them in the folder configured by:
 
 ```ini
 [Compatibility]
-ChainloadFolder=mctde-Link-Chainload
+ChainloadFolder=mctde-Link_Chainload
 ```
 
 By default, that folder should live next to `d3d9.dll` in the PTDE `DATA` folder.

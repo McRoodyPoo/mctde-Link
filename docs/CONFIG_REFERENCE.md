@@ -12,7 +12,7 @@ Controls normal log output from the hub, overlay, and version checker. Keep this
 
 ## Compatibility
 
-`ChainloadFolder=mctde-Link-Chainload`
+`ChainloadFolder=mctde-Link_Chainload`
 
 Names a folder next to `d3d9.dll` that will be scanned for additional DLLs to load. This is for compatibility with other PTDE tools or hook DLLs. The loader skips `d3d9.dll` itself and loads other DLLs in alphabetical order.
 

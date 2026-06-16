@@ -25,7 +25,9 @@
 #define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/latest.txt"
 
 #define MCTDE_DOWNLOAD_URL "https://www.nexusmods.com/darksouls/mods/1926?tab=files"
-#define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases/download/0.1.2/mctde-Link-0.1.2-release.zip"
+// Always points at the newest release page, so out-of-date users are routed to the
+// latest release regardless of which version they're running (no per-release edits).
+#define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases/latest"
 
 static bool g_versionLoggingConfigured = false;
 static bool g_versionLoggingEnabled = false;

@@ -27,7 +27,7 @@
 // PRODUCTION builds read the live latest.txt and pull updates from the real
 // "latest release", so every shipped DLL watches the same files real users get.
 //
-// TEST builds read a SEPARATE LatestVersion.txt and pull from a fixed GitHub
+// TEST builds read a SEPARATE TestingVersion.txt and pull from a fixed GitHub
 // PRE-RELEASE tagged "test". That lets you bump the test manifest and publish
 // test zips without prompting or updating anyone on a production build:
 //   * Production clients only ever read latest.txt (you leave it alone), and
@@ -38,13 +38,13 @@
 // so the rule is simply: build Debug = sandbox, build Release = ship to users.
 //
 // To test end-to-end you need (test channel only):
-//   1. A LatestVersion.txt on main (same format as latest.txt), and
+//   1. A TestingVersion.txt on main (same format as latest.txt), and
 //   2. A GitHub *pre-release* tagged "test" with a mctde-Link.zip asset.
 // ============================================================
 #ifdef MCTDE_LINK_TEST_CHANNEL
     #define MCTDE_LINK_CHANNEL_LABEL "TEST"
-    // https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/LatestVersion.txt
-    #define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/LatestVersion.txt"
+    // https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/TestingVersion.txt
+    #define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/TestingVersion.txt"
     #define MCTDE_LINK_RELEASE_ZIP_URL L"https://github.com/McRoodyPoo/mctde-Link/releases/download/test/mctde-Link.zip"
 #else
     #define MCTDE_LINK_CHANNEL_LABEL "RELEASE"

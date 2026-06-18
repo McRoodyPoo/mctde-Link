@@ -7,10 +7,10 @@ the `MCTDE_LINK_TEST_CHANNEL` macro, which the `.vcxproj` defines **only for Deb
 | Build       | Reads manifest        | Downloads update from                         | Use            |
 |-------------|-----------------------|-----------------------------------------------|----------------|
 | **Release** | `latest.txt`          | `/releases/latest/download/mctde-Link.zip`    | Ship to users  |
-| **Debug**   | `LatestVersion.txt`   | pre-release tagged `test` → `mctde-Link.zip`  | Sandbox testing |
+| **Debug**   | `TestingVersion.txt`   | pre-release tagged `test` → `mctde-Link.zip`  | Sandbox testing |
 
 Rule of thumb: **build Debug = sandbox, build Release = ship.** A pre-release never
-becomes `/releases/latest`, and real users never read `LatestVersion.txt`, so testing
+becomes `/releases/latest`, and real users never read `TestingVersion.txt`, so testing
 can never touch the installed population.
 
 ---
@@ -58,11 +58,11 @@ helper that waits for the game to exit, swaps the files, relaunches, and self-de
    (Debug needs the debug VC runtime — fine on a dev machine, don't hand it to users.)
 2. **Create a GitHub pre-release tagged exactly `test`** and attach a `mctde-Link.zip`
    containing the `d3d9.dll` you want it to install. Mark it **pre-release**.
-3. **Edit `LatestVersion.txt` on `main`** so `mctde-link=` is higher than the Debug
+3. **Edit `TestingVersion.txt` on `main`** so `mctde-link=` is higher than the Debug
    DLL's `CURRENT_MCTDE_LINK_VERSION`.
 4. **Launch the game.** A `[TEST]` update prompt fires:
    - **Yes** → downloads the `test` zip, closes the game, swaps in the new DLL, relaunches.
    - **No** → opens the releases page and closes the game.
 5. **Iterate** by re-uploading the asset on the same `test` pre-release and editing
-   `LatestVersion.txt`. Enable `[Settings] EnableLogging=1` to get step-by-step traces
+   `TestingVersion.txt`. Enable `[Settings] EnableLogging=1` to get step-by-step traces
    in `VersionCheck.log` (the log header line shows `Channel: TEST`).

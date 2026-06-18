@@ -679,6 +679,7 @@ static bool LaunchUpdater()
     std::string zipPath = installDir + "mctde-Link_update.zip";
     std::string stagingDir = installDir + "mctde-Link_update_tmp";
     std::string scriptPath = installDir + "mctde-Link_update.ps1";
+    std::string updateLogPath = installDir + "mctde-Link_update.log";
 
     WriteLog("Downloading latest release from " "github.com/McRoodyPoo/mctde-Link/releases/latest" ".");
 
@@ -701,40 +702,48 @@ static bool LaunchUpdater()
         return false;
     }
 
-    script << "$ErrorActionPreference = 'SilentlyContinue'\n";
+    script << "$ErrorActionPreference = 'Continue'\n";
     script << "$gamePid = " << gamePid << "\n";
     script << "$zip = " << PsSingleQuote(zipPath) << "\n";
     script << "$staging = " << PsSingleQuote(stagingDir) << "\n";
     script << "$install = " << PsSingleQuote(installDir) << "\n";
     script << "$exe = " << PsSingleQuote(std::string(exePath)) << "\n";
     script << "$self = " << PsSingleQuote(scriptPath) << "\n";
+    script << "$ulog = " << PsSingleQuote(updateLogPath) << "\n";
+    // Helper-side log so a failed swap/relaunch leaves a trail next to d3d9.dll.
+    script << "function L($m){ try { Add-Content -LiteralPath $ulog -Value (\"[{0}] {1}\" -f (Get-Date).ToString('HH:mm:ss'), $m) } catch {} }\n";
+    script << "L 'helper started.'\n";
     // 1. Wait for the game to close so d3d9.dll is no longer locked.
     script << "while (Get-Process -Id $gamePid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }\n";
+    script << "L 'game process exited; unlocking.'\n";
     script << "Start-Sleep -Milliseconds 750\n";
     // 2. Extract.
-    script << "if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }\n";
-    script << "Expand-Archive -Path $zip -DestinationPath $staging -Force\n";
+    script << "if (Test-Path $staging) { Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue }\n";
+    script << "try { Expand-Archive -Path $zip -DestinationPath $staging -Force -ErrorAction Stop; L 'extracted zip.' } catch { L ('extract FAILED: ' + $_.Exception.Message) }\n";
     // Locate d3d9.dll anywhere in the extracted tree; its folder is the source root.
-    script << "$dll = Get-ChildItem -Path $staging -Recurse -Filter d3d9.dll | Select-Object -First 1\n";
+    script << "$dll = Get-ChildItem -Path $staging -Recurse -Filter d3d9.dll -ErrorAction SilentlyContinue | Select-Object -First 1\n";
     script << "if ($dll) {\n";
     script << "  $src = $dll.Directory.FullName\n";
     // 3. Copy files, preserving the user's existing ini. Retry the copy in case the
     //    file is briefly still locked right after the process exits.
     script << "  foreach ($f in (Get-ChildItem -Path $src -File)) {\n";
     script << "    if (($f.Name -ieq 'mctde-link.ini') -and (Test-Path (Join-Path $install $f.Name))) { continue }\n";
+    script << "    $ok = $false\n";
     script << "    for ($i = 0; $i -lt 40; $i++) {\n";
-    script << "      try { Copy-Item -LiteralPath $f.FullName -Destination $install -Force -ErrorAction Stop; break }\n";
+    script << "      try { Copy-Item -LiteralPath $f.FullName -Destination $install -Force -ErrorAction Stop; $ok = $true; break }\n";
     script << "      catch { Start-Sleep -Milliseconds 500 }\n";
     script << "    }\n";
+    script << "    L ('copied ' + $f.Name + ' = ' + $ok)\n";
     script << "  }\n";
     // Copy any subfolders shipped in the zip (e.g. a chainload folder) as-is.
-    script << "  foreach ($d in (Get-ChildItem -Path $src -Directory)) { Copy-Item -LiteralPath $d.FullName -Destination $install -Recurse -Force }\n";
-    script << "}\n";
+    script << "  foreach ($d in (Get-ChildItem -Path $src -Directory)) { Copy-Item -LiteralPath $d.FullName -Destination $install -Recurse -Force -ErrorAction SilentlyContinue }\n";
+    script << "} else { L 'no d3d9.dll found in the downloaded zip!' }\n";
     // 4. Clean up and relaunch.
-    script << "Remove-Item -Recurse -Force $staging\n";
-    script << "Remove-Item -Force $zip\n";
-    script << "if (Test-Path $exe) { Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) }\n";
-    script << "Remove-Item -Force $self\n";
+    script << "Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue\n";
+    script << "Remove-Item -Force $zip -ErrorAction SilentlyContinue\n";
+    script << "if (Test-Path $exe) { try { Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe); L 'relaunched game.' } catch { L ('relaunch FAILED: ' + $_.Exception.Message) } } else { L 'game exe not found for relaunch.' }\n";
+    script << "L 'helper done.'\n";
+    script << "Remove-Item -Force $self -ErrorAction SilentlyContinue\n";
 
     script.close();
 
@@ -749,14 +758,21 @@ static bool LaunchUpdater()
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
 
-    // DETACHED_PROCESS so the helper outlives the game process we are about to kill.
+    // The game often runs inside a Job object (Steam / a launcher) with kill-on-close.
+    // If we leave the helper inside that job, terminating the game tears the helper down
+    // with it before it can swap the DLL. CREATE_BREAKAWAY_FROM_JOB pulls the helper out
+    // of the job so it survives. DETACHED_PROCESS keeps it console-independent. If the job
+    // forbids breakaway, CreateProcess fails with ERROR_ACCESS_DENIED -- fall back to a
+    // plain detached launch (still correct for the no-job case). CreateProcess can write to
+    // its command-line buffer, so each attempt gets its own copy.
+    std::string cmdBreakaway = command;
     BOOL launched = CreateProcessA(
         NULL,
-        &command[0],
+        &cmdBreakaway[0],
         NULL,
         NULL,
         FALSE,
-        CREATE_NO_WINDOW | DETACHED_PROCESS,
+        CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
         NULL,
         NULL,
         &si,
@@ -765,16 +781,42 @@ static bool LaunchUpdater()
 
     if (!launched)
     {
-        WriteLog("Failed to launch updater helper. Error code: " + std::to_string(GetLastError()));
-        DeleteFileA(zipPath.c_str());
-        DeleteFileA(scriptPath.c_str());
-        return false;
+        DWORD breakawayErr = GetLastError();
+        WriteLog("Breakaway launch failed (error " + std::to_string(breakawayErr) + "); retrying without breakaway.");
+
+        std::string cmdPlain = command;
+        ZeroMemory(&pi, sizeof(pi));
+        launched = CreateProcessA(
+            NULL,
+            &cmdPlain[0],
+            NULL,
+            NULL,
+            FALSE,
+            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            NULL,
+            NULL,
+            &si,
+            &pi
+        );
+
+        if (!launched)
+        {
+            WriteLog("Failed to launch updater helper. Error code: " + std::to_string(GetLastError()));
+            DeleteFileA(zipPath.c_str());
+            DeleteFileA(scriptPath.c_str());
+            return false;
+        }
+
+        WriteLog("Updater helper launched (no breakaway).");
+    }
+    else
+    {
+        WriteLog("Updater helper launched (broke away from job).");
     }
 
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
 
-    WriteLog("Updater helper launched.");
     return true;
 }
 

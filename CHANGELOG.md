@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.2.0 - Auto-Update
+
+- Added an in-game auto-updater. When a newer version is available, choosing **Yes** on the update prompt now downloads and installs the latest build automatically, then relaunches Dark Souls — no manual download needed.
+- The updater always pulls the newest release, so players who skipped several versions still land on the current build in one step. Your `mctde-link.ini` settings are preserved across updates.
+- Choosing **No** now opens the latest releases page and closes the game.
+- mctde (on NexusMods) keeps its manual download flow, since it can't be installed automatically.
+
+> Note: updating *to* 0.2.0 from an older build is a one-time manual download. From 0.2.0 onward, future updates install themselves.
+
 ## v0.1.3 - Phantom Unbreak
 
 - Overlay now renders as a true in-frame device wrapper inside d3d9.dll, drawing on top of DSFix's finished frame instead of fighting it.

@@ -16,7 +16,7 @@
 // Installed versions bundled with this release.
 // Change these every time you release a new version.
 #define CURRENT_MCTDE_VERSION "0.88"
-#define CURRENT_MCTDE_LINK_VERSION "0.1.2"
+#define CURRENT_MCTDE_LINK_VERSION "0.1.3"
 
 // Your GitHub raw file info.
 // Full URL:

@@ -355,6 +355,19 @@ void LoadOneDll(const char* dllName)
         return;
     }
 
+    // The in-frame overlay is now drawn inside d3d9.dll itself. A leftover copy of the old
+    // standalone overlay companion would double-hook the device (it created its own throwaway
+    // device and patched the shared Present/Reset vtable) and destabilize DSFix. Refuse to load
+    // it so a stale file in the chainload folder never breaks things -- no user cleanup needed.
+    if (EqualsIgnoreCaseA(fileName, "mctde_overlay.dll"))
+    {
+        std::string skipMessage = "Skipping ";
+        skipMessage += resolvedPath;
+        skipMessage += " because the in-frame overlay is now built into d3d9.dll (obsolete companion).";
+        WriteHubLogString(skipMessage);
+        return;
+    }
+
     std::string attemptMessage = "Attempting to load compatibility DLL ";
     attemptMessage += resolvedPath;
     attemptMessage += ".";
@@ -573,6 +586,12 @@ DWORD WINAPI HubThread(LPVOID)
         WriteHubLog("Could not find DARK SOULS window yet.");
 
     LoadRealD3D9();
+
+    // Install the in-frame overlay's device hooks now -- before the chainload pass (DSFix /
+    // Phantom_Break) and before the game creates its device -- so our Present draw lands inner
+    // to DSFix's frame composite (otherwise DSFix paints over the overlay during gameplay).
+    D3DOverlay_InstallEarly((void*)g_realDirect3DCreate9);
+
     StartBuiltInModules();
 
     WriteHubLog("mctde-Link single-dll d3d9 finished loading.");

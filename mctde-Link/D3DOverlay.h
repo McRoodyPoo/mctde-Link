@@ -1,16 +1,23 @@
 // D3DOverlay.h
 //
-// In d3d9.dll this module no longer draws anything itself. It just holds the latest
-// overlay bitmap (rasterized by the NetOverlay submit thread when [Render] Backend=d3d)
-// and exports it via McTDE_GetOverlayBitmap. The actual in-frame drawing is done by the
-// chainloaded companion (mctde_overlay.dll), which fetches that bitmap and draws it
-// through DSFix's real device. (The legacy GDI layered-window path, Backend=gdi, lives
-// in MCTDE_NetOverlay.cpp and doesn't use this module.)
+// In-frame Direct3D9 overlay, fully contained in d3d9.dll. The NetOverlay submit thread
+// rasterizes the overlay to a BGRA bitmap and calls D3DOverlay_Submit() (when [Render]
+// Backend=d3d). This module hooks the real device (via D3DOverlay_HookFactory) and draws
+// that bitmap in-frame at Present, on top of DSFix's finished frame. No separate companion
+// DLL, chainload-folder entry, or throwaway device is involved. (The legacy GDI
+// layered-window path, Backend=gdi, lives in MCTDE_NetOverlay.cpp and doesn't use this module.)
 
 #pragma once
 
-// Kept for the d3d9 proxy call site; no longer installs any hooks (companion does the work).
+// Called by the d3d9 proxy with the real IDirect3D9 it returns to the game / DSFix.
+// (Device hooks are installed earlier via D3DOverlay_InstallEarly; this only inits the lock.)
 void D3DOverlay_HookFactory(void* pIDirect3D9, bool isEx);
+
+// Install the device Present/Reset hooks early -- from HubThread during startup, BEFORE DSFix
+// hooks d3d9 -- so our overlay draws inner to (on top of) DSFix's frame composite. Pass the
+// real system Direct3DCreate9 function pointer (used to spin up a throwaway probe device whose
+// shared vtable is patched). Safe to call once; subsequent calls are no-ops.
+void D3DOverlay_InstallEarly(void* direct3DCreate9Fn);
 
 // Backend selection bookkeeping (driven by [Render] config).
 void D3DOverlay_SetEnabled(bool enabled);

@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.3 - Phantom Unbreak
+
+- Overlay now renders as a true in-frame device wrapper inside d3d9.dll, drawing on top of DSFix's finished frame instead of fighting it.
+- The obsolete mctde_overlay.dll companion is ignored automatically if left behind in the chainload folder, so updating can't double-hook DSFix.
+- Fixed a device-teardown resource leak that could crash on resolution changes or device recreation.
+
 ## v0.1.2 - Performance Upgrade
 
 - Fixed the overlay causing frametime stutter.

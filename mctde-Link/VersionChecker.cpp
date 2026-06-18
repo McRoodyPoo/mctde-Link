@@ -18,16 +18,56 @@
 #define CURRENT_MCTDE_VERSION "0.88"
 #define CURRENT_MCTDE_LINK_VERSION "0.1.3"
 
-// Your GitHub raw file info.
-// Full URL:
-// https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/latest.txt
+// Your GitHub raw file host.
 #define VERSION_HOST L"raw.githubusercontent.com"
-#define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/latest.txt"
+
+// ============================================================
+// Release channel (sandboxing)
+// ------------------------------------------------------------
+// PRODUCTION builds read the live latest.txt and pull updates from the real
+// "latest release", so every shipped DLL watches the same files real users get.
+//
+// TEST builds read a SEPARATE LatestVersion.txt and pull from a fixed GitHub
+// PRE-RELEASE tagged "test". That lets you bump the test manifest and publish
+// test zips without prompting or updating anyone on a production build:
+//   * Production clients only ever read latest.txt (you leave it alone), and
+//   * a pre-release never becomes /releases/latest, so production clients can't
+//     even download the test zip.
+//
+// MCTDE_LINK_TEST_CHANNEL is defined for the Debug configuration in the .vcxproj,
+// so the rule is simply: build Debug = sandbox, build Release = ship to users.
+//
+// To test end-to-end you need (test channel only):
+//   1. A LatestVersion.txt on main (same format as latest.txt), and
+//   2. A GitHub *pre-release* tagged "test" with a mctde-Link.zip asset.
+// ============================================================
+#ifdef MCTDE_LINK_TEST_CHANNEL
+    #define MCTDE_LINK_CHANNEL_LABEL "TEST"
+    // https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/LatestVersion.txt
+    #define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/LatestVersion.txt"
+    #define MCTDE_LINK_RELEASE_ZIP_URL L"https://github.com/McRoodyPoo/mctde-Link/releases/download/test/mctde-Link.zip"
+#else
+    #define MCTDE_LINK_CHANNEL_LABEL "RELEASE"
+    // https://raw.githubusercontent.com/McRoodyPoo/mctde-Link/main/latest.txt
+    #define VERSION_PATH L"/McRoodyPoo/mctde-Link/main/latest.txt"
+    #define MCTDE_LINK_RELEASE_ZIP_URL L"https://github.com/McRoodyPoo/mctde-Link/releases/latest/download/mctde-Link.zip"
+#endif
 
 #define MCTDE_DOWNLOAD_URL "https://www.nexusmods.com/darksouls/mods/1926?tab=files"
 // Releases list page (not a version-pinned zip), so out-of-date users always land on the
 // page where they can grab the newest release, regardless of which version they run.
 #define MCTDE_LINK_DOWNLOAD_URL "https://github.com/McRoodyPoo/mctde-Link/releases"
+
+// Where the "No" button (and any auto-update fallback) sends the user.
+#define MCTDE_LINK_RELEASES_LATEST_URL "https://github.com/McRoodyPoo/mctde-Link/releases/latest"
+
+// The update zip URL (MCTDE_LINK_RELEASE_ZIP_URL) is defined per-channel above.
+//
+// RELEASE REQUIREMENT: every GitHub release (and the "test" pre-release) MUST attach a
+// zip asset named exactly "mctde-Link.zip" containing d3d9.dll (and optionally a fresh
+// mctde-link.ini / extras). The zip's files may sit at the zip root or inside a single
+// top-level folder; the updater locates d3d9.dll automatically. The user's existing
+// mctde-link.ini is never overwritten, so their settings survive the update.
 
 static bool g_versionLoggingConfigured = false;
 static bool g_versionLoggingEnabled = false;
@@ -421,6 +461,323 @@ std::string DownloadLatestManifest()
     return Trim(result);
 }
 
+// ============================================================
+// Auto-updater
+// ============================================================
+
+// ------------------------------------------------------------
+// Downloads any HTTPS URL to a file, following GitHub's
+// release -> CDN redirects (WinHTTP follows HTTPS->HTTPS by
+// default). Verifies the payload begins with the zip magic
+// "PK" so a redirected HTML error page never gets installed.
+// ------------------------------------------------------------
+static bool DownloadUrlToFile(const wchar_t* url, const std::string& outPath)
+{
+    URL_COMPONENTS comps;
+    ZeroMemory(&comps, sizeof(comps));
+    comps.dwStructSize = sizeof(comps);
+
+    wchar_t host[256] = { 0 };
+    wchar_t urlPath[2048] = { 0 };
+    comps.lpszHostName = host;
+    comps.dwHostNameLength = ARRAYSIZE(host);
+    comps.lpszUrlPath = urlPath;
+    comps.dwUrlPathLength = ARRAYSIZE(urlPath);
+
+    if (!WinHttpCrackUrl(url, 0, 0, &comps))
+    {
+        WriteLog("WinHttpCrackUrl failed for update URL.");
+        return false;
+    }
+
+    HINTERNET hSession = WinHttpOpen(
+        L"MCTDEUpdater/1.0",
+        WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS,
+        0
+    );
+
+    if (!hSession)
+    {
+        WriteLog("WinHttpOpen failed (updater).");
+        return false;
+    }
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host, comps.nPort, 0);
+
+    if (!hConnect)
+    {
+        WriteLog("WinHttpConnect failed (updater).");
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    DWORD flags = (comps.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+
+    HINTERNET hRequest = WinHttpOpenRequest(
+        hConnect,
+        L"GET",
+        urlPath,
+        NULL,
+        WINHTTP_NO_REFERER,
+        WINHTTP_DEFAULT_ACCEPT_TYPES,
+        flags
+    );
+
+    if (!hRequest)
+    {
+        WriteLog("WinHttpOpenRequest failed (updater).");
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return false;
+    }
+
+    bool ok = false;
+
+    if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(hRequest, NULL))
+    {
+        DWORD statusCode = 0;
+        DWORD statusCodeSize = sizeof(statusCode);
+
+        WinHttpQueryHeaders(
+            hRequest,
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX,
+            &statusCode,
+            &statusCodeSize,
+            WINHTTP_NO_HEADER_INDEX
+        );
+
+        if (statusCode == 200)
+        {
+            std::ofstream out(outPath.c_str(), std::ios::binary | std::ios::trunc);
+
+            if (out.is_open())
+            {
+                DWORD size = 0;
+                DWORD total = 0;
+                bool firstChunk = true;
+                bool looksLikeZip = false;
+
+                do
+                {
+                    if (!WinHttpQueryDataAvailable(hRequest, &size))
+                    {
+                        WriteLog("WinHttpQueryDataAvailable failed (updater).");
+                        break;
+                    }
+
+                    if (size == 0)
+                    {
+                        break;
+                    }
+
+                    std::vector<char> buffer(size);
+                    DWORD downloaded = 0;
+
+                    if (WinHttpReadData(hRequest, buffer.data(), size, &downloaded) && downloaded > 0)
+                    {
+                        if (firstChunk)
+                        {
+                            looksLikeZip = (downloaded >= 2 && buffer[0] == 'P' && buffer[1] == 'K');
+                            firstChunk = false;
+                        }
+
+                        out.write(buffer.data(), downloaded);
+                        total += downloaded;
+                    }
+                    else
+                    {
+                        WriteLog("WinHttpReadData failed (updater).");
+                        break;
+                    }
+                }
+                while (size > 0);
+
+                out.close();
+
+                if (looksLikeZip && total > 0)
+                {
+                    WriteLog("Downloaded update zip (" + std::to_string(total) + " bytes).");
+                    ok = true;
+                }
+                else
+                {
+                    WriteLog("Downloaded update payload was not a valid zip; discarding.");
+                    DeleteFileA(outPath.c_str());
+                }
+            }
+            else
+            {
+                WriteLog("Could not open update file for writing.");
+            }
+        }
+        else
+        {
+            WriteLog("Update download failed. Status code: " + std::to_string(statusCode));
+        }
+    }
+    else
+    {
+        WriteLog("Update request send/receive failed.");
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    return ok;
+}
+
+// ------------------------------------------------------------
+// Wraps a string as a PowerShell single-quoted literal so paths
+// with spaces (e.g. OneDrive) are passed safely. Single quotes
+// inside are escaped by doubling, per PowerShell rules.
+// ------------------------------------------------------------
+static std::string PsSingleQuote(const std::string& text)
+{
+    std::string result = "'";
+
+    for (size_t i = 0; i < text.size(); i++)
+    {
+        if (text[i] == '\'')
+        {
+            result += "''";
+        }
+        else
+        {
+            result += text[i];
+        }
+    }
+
+    result += "'";
+    return result;
+}
+
+// ------------------------------------------------------------
+// Downloads the latest release zip, then writes and launches a
+// detached PowerShell helper that:
+//   1. waits for this game process to fully exit (unlocking d3d9.dll),
+//   2. extracts the zip and copies the new files into place
+//      (preserving the user's existing mctde-link.ini),
+//   3. relaunches Dark Souls,
+//   4. cleans up the zip, staging folder, and itself.
+// Returns true once the helper has been launched. The caller must
+// then terminate the game so the locked d3d9.dll can be replaced.
+// ------------------------------------------------------------
+static bool LaunchUpdater()
+{
+    std::string installDir = GetDllDirectory();
+    if (!installDir.empty() && installDir[installDir.size() - 1] != '\\' && installDir[installDir.size() - 1] != '/')
+    {
+        installDir += "\\";
+    }
+
+    std::string zipPath = installDir + "mctde-Link_update.zip";
+    std::string stagingDir = installDir + "mctde-Link_update_tmp";
+    std::string scriptPath = installDir + "mctde-Link_update.ps1";
+
+    WriteLog("Downloading latest release from " "github.com/McRoodyPoo/mctde-Link/releases/latest" ".");
+
+    if (!DownloadUrlToFile(MCTDE_LINK_RELEASE_ZIP_URL, zipPath))
+    {
+        WriteLog("Auto-update download failed.");
+        return false;
+    }
+
+    char exePath[MAX_PATH] = { 0 };
+    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+
+    DWORD gamePid = GetCurrentProcessId();
+
+    std::ofstream script(scriptPath.c_str(), std::ios::trunc);
+    if (!script.is_open())
+    {
+        WriteLog("Could not write updater helper script.");
+        DeleteFileA(zipPath.c_str());
+        return false;
+    }
+
+    script << "$ErrorActionPreference = 'SilentlyContinue'\n";
+    script << "$gamePid = " << gamePid << "\n";
+    script << "$zip = " << PsSingleQuote(zipPath) << "\n";
+    script << "$staging = " << PsSingleQuote(stagingDir) << "\n";
+    script << "$install = " << PsSingleQuote(installDir) << "\n";
+    script << "$exe = " << PsSingleQuote(std::string(exePath)) << "\n";
+    script << "$self = " << PsSingleQuote(scriptPath) << "\n";
+    // 1. Wait for the game to close so d3d9.dll is no longer locked.
+    script << "while (Get-Process -Id $gamePid -ErrorAction SilentlyContinue) { Start-Sleep -Milliseconds 500 }\n";
+    script << "Start-Sleep -Milliseconds 750\n";
+    // 2. Extract.
+    script << "if (Test-Path $staging) { Remove-Item -Recurse -Force $staging }\n";
+    script << "Expand-Archive -Path $zip -DestinationPath $staging -Force\n";
+    // Locate d3d9.dll anywhere in the extracted tree; its folder is the source root.
+    script << "$dll = Get-ChildItem -Path $staging -Recurse -Filter d3d9.dll | Select-Object -First 1\n";
+    script << "if ($dll) {\n";
+    script << "  $src = $dll.Directory.FullName\n";
+    // 3. Copy files, preserving the user's existing ini. Retry the copy in case the
+    //    file is briefly still locked right after the process exits.
+    script << "  foreach ($f in (Get-ChildItem -Path $src -File)) {\n";
+    script << "    if (($f.Name -ieq 'mctde-link.ini') -and (Test-Path (Join-Path $install $f.Name))) { continue }\n";
+    script << "    for ($i = 0; $i -lt 40; $i++) {\n";
+    script << "      try { Copy-Item -LiteralPath $f.FullName -Destination $install -Force -ErrorAction Stop; break }\n";
+    script << "      catch { Start-Sleep -Milliseconds 500 }\n";
+    script << "    }\n";
+    script << "  }\n";
+    // Copy any subfolders shipped in the zip (e.g. a chainload folder) as-is.
+    script << "  foreach ($d in (Get-ChildItem -Path $src -Directory)) { Copy-Item -LiteralPath $d.FullName -Destination $install -Recurse -Force }\n";
+    script << "}\n";
+    // 4. Clean up and relaunch.
+    script << "Remove-Item -Recurse -Force $staging\n";
+    script << "Remove-Item -Force $zip\n";
+    script << "if (Test-Path $exe) { Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) }\n";
+    script << "Remove-Item -Force $self\n";
+
+    script.close();
+
+    std::string command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"";
+    command += scriptPath;
+    command += "\"";
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    // DETACHED_PROCESS so the helper outlives the game process we are about to kill.
+    BOOL launched = CreateProcessA(
+        NULL,
+        &command[0],
+        NULL,
+        NULL,
+        FALSE,
+        CREATE_NO_WINDOW | DETACHED_PROCESS,
+        NULL,
+        NULL,
+        &si,
+        &pi
+    );
+
+    if (!launched)
+    {
+        WriteLog("Failed to launch updater helper. Error code: " + std::to_string(GetLastError()));
+        DeleteFileA(zipPath.c_str());
+        DeleteFileA(scriptPath.c_str());
+        return false;
+    }
+
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    WriteLog("Updater helper launched.");
+    return true;
+}
+
 // ------------------------------------------------------------
 // This runs after the DLL loads.
 // Do NOT do internet stuff directly inside DllMain.
@@ -429,6 +786,7 @@ DWORD WINAPI VersionCheckThread(LPVOID)
 {
     WriteLog("----------------------------------------");
     WriteLog("Version checker started.");
+    WriteLog("Channel: " MCTDE_LINK_CHANNEL_LABEL);
 
     std::string latestManifest = DownloadLatestManifest();
 
@@ -454,60 +812,97 @@ DWORD WINAPI VersionCheckThread(LPVOID)
         return 0;
     }
 
-    const char* downloadUrl = MCTDE_LINK_DOWNLOAD_URL;
-    const char* title = "mctde-link Update Required";
-    std::string popupMessage;
-
+    // mctde takes priority. It lives on NexusMods (which can't be scripted from a
+    // mod DLL), so it keeps the manual open-the-page flow rather than auto-installing.
     if (mctdeOutOfDate)
     {
         WriteLog("mctde update available.");
 
-        downloadUrl = MCTDE_DOWNLOAD_URL;
-        title = "mctde Update Required";
-        popupMessage =
+        std::string popupMessage =
             "mctde is out of date. Open the download page?\n\n"
             "Installed mctde version: " + std::string(CURRENT_MCTDE_VERSION) + "\n"
             "Latest mctde version: " + latestVersions.mctde + "\n\n"
             "Dark Souls will close either way so you can install the update.";
-    }
-    else
-    {
-        WriteLog("mctde-link update available.");
 
-        popupMessage =
-            "mctde-link is out of date. Open the download page?\n\n"
-            "Installed mctde-link version: " + std::string(CURRENT_MCTDE_LINK_VERSION) + "\n"
-            "Latest mctde-link version: " + latestVersions.mctdeLink + "\n\n"
-            "Dark Souls will close either way so you can install the update.";
+        int result = MessageBoxA(
+            NULL,
+            popupMessage.c_str(),
+            "mctde Update Required",
+            MB_YESNO | MB_ICONWARNING | MB_TOPMOST
+        );
+
+        if (result == IDYES)
+        {
+            WriteLog("User chose to update mctde. Opening NexusMods page, then closing Dark Souls.");
+            ShellExecuteA(NULL, "open", MCTDE_DOWNLOAD_URL, NULL, NULL, SW_SHOWNORMAL);
+            Sleep(750); // give the browser a moment to launch before we exit
+        }
+        else
+        {
+            WriteLog("User declined mctde update. Closing Dark Souls.");
+        }
+
+        TerminateProcess(GetCurrentProcess(), 0);
+        ExitProcess(0);
+        return 0;
     }
+
+    // mctde-Link auto-update.
+    WriteLog("mctde-link update available.");
+
+    std::string popupMessage =
+        "A new version of mctde-Link is available.\n\n"
+        "Installed: " + std::string(CURRENT_MCTDE_LINK_VERSION) + "\n"
+        "Latest: " + latestVersions.mctdeLink + "\n\n"
+        "Yes  -  Download and install the update automatically. Dark Souls will close and reopen.\n\n"
+        "No  -  Close Dark Souls and open the releases page so you can update manually.";
+
+#ifdef MCTDE_LINK_TEST_CHANNEL
+    const char* updateTitle = "[TEST] mctde-Link Update Available";
+#else
+    const char* updateTitle = "mctde-Link Update Available";
+#endif
 
     int result = MessageBoxA(
         NULL,
         popupMessage.c_str(),
-        title,
-        MB_YESNO | MB_ICONWARNING | MB_TOPMOST
+        updateTitle,
+        MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST
     );
 
     if (result == IDYES)
     {
-        WriteLog("User chose to update. Opening download page, then closing Dark Souls.");
-        ShellExecuteA(
-            NULL,
-            "open",
-            downloadUrl,
-            NULL,
-            NULL,
-            SW_SHOWNORMAL
-        );
-        Sleep(750); // give the browser a moment to launch before we exit
+        WriteLog("User chose auto-update.");
+
+        if (LaunchUpdater())
+        {
+            WriteLog("Auto-update staged. Closing Dark Souls so the new d3d9.dll can be installed.");
+        }
+        else
+        {
+            // Download or helper launch failed -- fall back to the manual page so the
+            // user is never left stuck on an out-of-date build.
+            WriteLog("Auto-update failed. Falling back to the releases page.");
+            MessageBoxA(
+                NULL,
+                "The automatic update could not be downloaded.\n\n"
+                "The releases page will open so you can update manually.",
+                "mctde-Link Update",
+                MB_OK | MB_ICONWARNING | MB_TOPMOST
+            );
+            ShellExecuteA(NULL, "open", MCTDE_LINK_RELEASES_LATEST_URL, NULL, NULL, SW_SHOWNORMAL);
+            Sleep(750);
+        }
     }
     else
     {
-        WriteLog("User declined update. Closing Dark Souls.");
+        WriteLog("User declined auto-update. Opening releases page and closing Dark Souls.");
+        ShellExecuteA(NULL, "open", MCTDE_LINK_RELEASES_LATEST_URL, NULL, NULL, SW_SHOWNORMAL);
+        Sleep(750);
     }
 
-    // Either way, close Dark Souls so the player can install the update
-    // (d3d9.dll can't be replaced while the game holds it open).
+    // Close Dark Souls so the locked d3d9.dll can be replaced (by the helper on Yes,
+    // or by the user manually on No / fallback).
     TerminateProcess(GetCurrentProcess(), 0);
     ExitProcess(0);
 

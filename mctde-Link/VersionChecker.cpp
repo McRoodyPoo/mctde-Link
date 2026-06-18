@@ -747,7 +747,7 @@ static bool LaunchUpdater()
 
     script.close();
 
-    std::string command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"";
+    std::string command = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"";
     command += scriptPath;
     command += "\"";
 
@@ -761,10 +761,15 @@ static bool LaunchUpdater()
     // The game often runs inside a Job object (Steam / a launcher) with kill-on-close.
     // If we leave the helper inside that job, terminating the game tears the helper down
     // with it before it can swap the DLL. CREATE_BREAKAWAY_FROM_JOB pulls the helper out
-    // of the job so it survives. DETACHED_PROCESS keeps it console-independent. If the job
-    // forbids breakaway, CreateProcess fails with ERROR_ACCESS_DENIED -- fall back to a
-    // plain detached launch (still correct for the no-job case). CreateProcess can write to
-    // its command-line buffer, so each attempt gets its own copy.
+    // of the job so it survives. CREATE_NO_WINDOW gives it a hidden console.
+    //
+    // Do NOT add DETACHED_PROCESS: combined with CREATE_NO_WINDOW it makes powershell.exe
+    // launch but silently refuse to run its -File script (verified empirically). Breakaway
+    // -- not detachment -- is what keeps the helper alive past the game's death.
+    //
+    // If the job forbids breakaway, CreateProcess fails with ERROR_ACCESS_DENIED -- fall
+    // back to a plain CREATE_NO_WINDOW launch (still correct for the no-job case).
+    // CreateProcess can write to its command-line buffer, so each attempt gets its own copy.
     std::string cmdBreakaway = command;
     BOOL launched = CreateProcessA(
         NULL,
@@ -772,7 +777,7 @@ static bool LaunchUpdater()
         NULL,
         NULL,
         FALSE,
-        CREATE_NO_WINDOW | DETACHED_PROCESS | CREATE_BREAKAWAY_FROM_JOB,
+        CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB,
         NULL,
         NULL,
         &si,
@@ -792,7 +797,7 @@ static bool LaunchUpdater()
             NULL,
             NULL,
             FALSE,
-            CREATE_NO_WINDOW | DETACHED_PROCESS,
+            CREATE_NO_WINDOW,
             NULL,
             NULL,
             &si,

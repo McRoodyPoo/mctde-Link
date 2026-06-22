@@ -9,6 +9,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include "D3DOverlay.h"
+#include "MorePhantoms.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -65,9 +66,11 @@ static bool g_triedWorldChrBaseScan = false;
 
 static const uintptr_t OFF_WORLDCHR_SELF = 0x3C;
 static const uintptr_t OFF_CHR_MP_ROOT = 0x0C;
-static const uintptr_t OFF_MPCHR1 = 0x20;
-static const uintptr_t OFF_MPCHR2 = 0x40;
-static const uintptr_t OFF_MPCHR3 = 0x60;
+// Remote phantom character pointers are a contiguous array off the MP root: slot k
+// lives at mpRoot + 0x20*k (stock PTDE exposes slots 1..3). MorePhantoms resizes this
+// array, so the overlay reads as many slots as are currently live.
+static const uintptr_t OFF_MPCHR_FIRST   = 0x20; // slot 1
+static const uintptr_t OFF_MPCHR_STRIDE  = 0x20; // bytes per slot
 static const uintptr_t OFF_CHR_PLAYER_PARAM = 0x414;
 static const uintptr_t OFF_CHR_PHANTOM_DATA = 0x658;
 // DS-Gadget exposes these as CharData1 ChrType/TeamType. Ashley table paths read
@@ -1504,6 +1507,22 @@ static void AddWorldActorRow(std::vector<WorldActorRow>& rows, const char* name,
     rows.push_back(row);
 }
 
+// Persistent diagnostic labels ("R1".."R31") for remote slots. Function-local static
+// init is thread-safe under MSVC, and the strings live for the program's lifetime so
+// the const char* stored in WorldActorRow stays valid.
+static const char* RemoteSlotLabel(int k)
+{
+    static const std::vector<std::string> labels = []{
+        std::vector<std::string> v;
+        for (int i = 0; i < MAX_TRACKED_PLAYER_NO; ++i)
+            v.push_back("R" + std::to_string(i));
+        return v;
+    }();
+    if (k < 0 || k >= (int)labels.size())
+        return "R?";
+    return labels[(size_t)k].c_str();
+}
+
 static std::vector<WorldActorRow> ReadWorldActors()
 {
     std::vector<WorldActorRow> rows;
@@ -1515,9 +1534,6 @@ static std::vector<WorldActorRow> ReadWorldActors()
     uintptr_t worldChrBase = 0;
     uintptr_t selfChr = 0;
     uintptr_t mpRoot = 0;
-    uintptr_t mpChr1 = 0;
-    uintptr_t mpChr2 = 0;
-    uintptr_t mpChr3 = 0;
 
     SafeRead(worldChrBaseAddress, worldChrBase);
     if (!LooksLikePointer(worldChrBase))
@@ -1527,19 +1543,24 @@ static std::vector<WorldActorRow> ReadWorldActors()
     AddWorldActorRow(rows, "SELF", 0, selfChr);
 
     if (LooksLikePointer(selfChr))
-    {
         SafeRead(selfChr + OFF_CHR_MP_ROOT, mpRoot);
-        if (LooksLikePointer(mpRoot))
-        {
-            SafeRead(mpRoot + OFF_MPCHR1, mpChr1);
-            SafeRead(mpRoot + OFF_MPCHR2, mpChr2);
-            SafeRead(mpRoot + OFF_MPCHR3, mpChr3);
-        }
-    }
 
-    AddWorldActorRow(rows, "R1", 1, mpChr1);
-    AddWorldActorRow(rows, "R2", 2, mpChr2);
-    AddWorldActorRow(rows, "R3", 3, mpChr3);
+    // Read one row per remote phantom slot. Stock PTDE has 3 (self + 3 = 4); when
+    // MorePhantoms is active the slot array is larger, so iterate up to the live count.
+    // Slots whose pointer is null/garbage become invalid rows and are filtered downstream,
+    // so an over-read can never crash (SafeRead is fault-guarded, LooksLikePointer screens).
+    int total = MorePhantoms_ActivePhantomCount(); // self + (total - 1) remotes
+    if (total < 4) total = 4;
+    if (total > MAX_TRACKED_PLAYER_NO) total = MAX_TRACKED_PLAYER_NO;
+
+    const bool mpValid = LooksLikePointer(mpRoot);
+    for (int k = 1; k < total; ++k)
+    {
+        uintptr_t mpChr = 0;
+        if (mpValid)
+            SafeRead(mpRoot + OFF_MPCHR_FIRST + OFF_MPCHR_STRIDE * (uintptr_t)(k - 1), mpChr);
+        AddWorldActorRow(rows, RemoteSlotLabel(k), k, mpChr);
+    }
     return rows;
 }
 
@@ -6786,6 +6807,7 @@ static DWORD WINAPI WatchdogThread(LPVOID)
         {
             WriteLogLine("Watchdog: game window gone; forcing process exit to avoid a zombie process.");
             g_running = false;
+            MorePhantoms_Restore(); // revert any applied phantom-cap patches before we exit
             ExitProcess(0);
         }
     }
@@ -6882,6 +6904,7 @@ extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule)
 extern "C" void McTDE_NetOverlay_OnProcessDetach()
 {
     g_running = false;
+    MorePhantoms_Restore(); // revert phantom-cap patches so a half-patched image never outlives us
     DisableTruePingTimerPeriod();
     StopWebSocketServer();
     D3DOverlay_Shutdown();

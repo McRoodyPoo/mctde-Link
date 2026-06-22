@@ -16,11 +16,19 @@
     <ClCompile Include="VersionChecker.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="pch.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="D3DOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="MorePhantoms.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="PatchEngine.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="MorePhantomsStage1.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="MorePhantomsStage2.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="pch.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="D3DOverlay.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="MorePhantoms.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="PatchEngine.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="MorePhantomsStage1.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="MorePhantomsStage2.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Text Include="d3d9.def"><Filter>Source Files</Filter></Text>

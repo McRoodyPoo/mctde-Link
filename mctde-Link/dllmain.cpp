@@ -7,6 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include "D3DOverlay.h"
+#include "MorePhantoms.h"
 
 #ifdef MCTDE_LINK_SINGLE_DLL
 extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule);
@@ -565,6 +566,11 @@ void StartBuiltInModules()
 
     WriteHubLog("Starting built-in VersionChecker module.");
     McTDE_VersionChecker_Start();
+
+    // NOTE: MorePhantoms is intentionally NOT started here. It must gate synchronously on
+    // the game's main thread (see Direct3DCreate9 / Direct3DCreate9Ex) so the phantom-cap
+    // patches and pool segregation are in place BEFORE the game opens. Starting it on this
+    // HubThread would race the game's own startup.
 #endif
 }
 
@@ -606,6 +612,14 @@ DWORD WINAPI HubThread(LPVOID)
 
 extern "C" void* WINAPI Direct3DCreate9(UINT SDKVersion)
 {
+#ifdef MCTDE_LINK_SINGLE_DLL
+    // MorePhantoms gate: runs synchronously on the GAME'S MAIN THREAD at its first D3D
+    // touch -- before device creation and any multiplayer/session init. Shows the opt-in
+    // prompt and applies the phantom-cap patches + pool segregation while the game is still
+    // blocked here, so they are guaranteed to be in place before the game opens. Idempotent.
+    MorePhantoms_Start();
+#endif
+
     LoadCompatibilityDllsOnce();
     LoadRealD3D9();
 
@@ -630,6 +644,12 @@ extern "C" void* WINAPI Direct3DCreate9(UINT SDKVersion)
 
 extern "C" HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, void** ppD3D)
 {
+#ifdef MCTDE_LINK_SINGLE_DLL
+    // See Direct3DCreate9 above: gate MorePhantoms on the game's main thread before it
+    // proceeds. Idempotent -- whichever Create entry the game uses, this runs exactly once.
+    MorePhantoms_Start();
+#endif
+
     LoadCompatibilityDllsOnce();
     LoadRealD3D9();
 

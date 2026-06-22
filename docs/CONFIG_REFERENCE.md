@@ -22,6 +22,30 @@ Names a folder next to `d3d9.dll` that will be scanned for additional DLLs to lo
 
 Optional explicit DLL entries to load during startup. Leave blank to disable. The code supports `GenericDLL0` through `GenericDLL31`, but the sample lists the first ten to keep the config readable.
 
+## MorePhantoms
+
+Built-in phantom-cap raiser (rewrite of Metal-Crow's MultiPhantom / Dark Souls Overhaul patch on mctde-Link's patch engine; offset facts credited to his reverse-engineering work). While enabled you join a separate matchmaking pool and only connect with other MorePhantoms players on the same `NetworkVersion` and `MaxPhantoms`. Do not run it alongside `Phantom_Break.dll` (it refuses to apply if one is present).
+
+`Mode=Ask`
+
+`Ask` shows a Yes/No prompt at launch (default, **No** highlighted). `On` always enables without a prompt; `Off` never enables. **Linux/Proton:** the `Ask` prompt is not supported and is skipped (MorePhantoms stays off) — set `Mode=On` or `Mode=Off` manually.
+
+`MaxPhantoms=18`
+
+Total players in your world (stock 4). Keep at `18` for a stable large session; the offset-shift trampolines are calibrated for 18.
+
+`NetworkVersion=0x4D`
+
+Matchmaking pool key (vanilla retail is `0x2E`). Everyone in a session must share this and `MaxPhantoms`. Set `0x2E` to rejoin the vanilla pool.
+
+`MemoryPoolMB=192`
+
+Raises the game's internal memory pool (stock ~10 MB is too small for many phantoms). Range `0`–`255`; `0` leaves it stock.
+
+`VerifyOnly=0`
+
+`0` applies the patches when enabled (normal). `1` only writes the offset self-check to `MorePhantoms.log` and never modifies the game.
+
 ## Overlay
 
 `ShowHeader=1`

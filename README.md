@@ -90,6 +90,75 @@ To disable Phantom Break, blank its `GenericDLL` entry in `mctde-link.ini`:
 GenericDLL0=
 ```
 
+## MorePhantoms (built-in phantom-cap raise)
+
+`mctde-Link` now includes its own optional phantom-cap raiser, built directly into
+`d3d9.dll` — no separate DLL or chainload entry is needed. It lifts PTDE's stock limit of
+four simultaneous players in a world.
+
+### Launch-time prompt
+
+When the game starts you'll see a **Yes / No** box:
+
+> **Enable MorePhantoms?** This raises the co-op / invasion phantom cap above the stock 4.
+> While enabled you will **only** be able to connect with other players who also have
+> MorePhantoms enabled. Choose **No** to play with everyone on the normal phantom limit.
+
+- **No** — nothing is patched; you stay in the normal pool and can connect with everyone.
+- **Yes** — the phantom-cap patches are applied and you join the **segregated MorePhantoms
+  pool**, so a vanilla player is never pulled into a larger-than-four session.
+
+### Configuration
+
+The `[MorePhantoms]` section of `mctde-link.ini` controls it:
+
+```ini
+[MorePhantoms]
+Mode=Ask          ; Ask = prompt each launch (default) | On = always | Off = never
+MaxPhantoms=18    ; total player slots in your world (stock 4; range 4-32)
+NetworkVersion=0x4D ; matchmaking pool key (vanilla retail = 0x2E). This is what segregates
+                  ;   you from the vanilla pool; all players must share it AND MaxPhantoms.
+MemoryPoolMB=192  ; game internal memory pool (stock ~10 MB is too small for many phantoms;
+                  ;   0 = leave stock, max 255)
+VerifyOnly=1      ; 1 = only log the offset self-check, never patch. Set 0 to apply.
+```
+
+Stock DS1 self-allocates only a ~10 MB internal memory pool — fine for 4 players, but too
+small once many phantoms load their models, gear, and animations, which would cause
+allocation failures. MorePhantoms raises this pool (default 192 MB, capped at a safe 255 MB)
+so a full session has room. (DARKSOULS.exe is 32-bit, so total memory is still bounded by the
+~2 GB address space — 4 GB if a tool like DSFix enables Large Address Aware.)
+
+**How segregation works:** Dark Souls only pairs players whose 1-byte network version
+matches. Raising the phantom cap alone does **not** separate you from vanilla players — you
+must also change this version. MorePhantoms writes `NetworkVersion` (default `0x4D`) at the
+game's three version-check sites, so a MorePhantoms client only ever connects to other
+MorePhantoms clients sharing the same value. (Reverse engineering of the version sites:
+Metal-Crow's Overhaul.)
+
+The prompt and patching happen on the game's main thread at its first Direct3D call —
+before the game window opens and before any multiplayer/session init — because the phantom
+cap and pool segregation must be in place before the game comes up. The VERIFY report is
+written to `MorePhantoms.log` next to `d3d9.dll` regardless of the `[Settings] EnableLogging`
+switch.
+
+> **Status / safety:** this feature ships with `VerifyOnly=1`. In that mode it only writes a
+> verification report to `MorePhantoms.log` and never modifies the running game. Set
+> `VerifyOnly=0` to actually apply. Both the Stage 1 cap/segregation patches and the Stage 2
+> runtime offset-shift trampolines (which make a larger-than-four session stable) are
+> implemented; Stage 2 is calibrated for `MaxPhantoms=18`. Every patch is reversible and is
+> reverted automatically when the game closes.
+>
+> **Do not run alongside Phantom_Break.** Both mods patch the same phantom-cap offsets;
+> running them together double-patches the game and crashes. MorePhantoms detects a loaded or
+> chainloaded `Phantom_Break.dll` and refuses to apply.
+
+This feature is a rewrite of Metal-Crow's MultiPhantom /
+[Dark Souls Overhaul](https://github.com/metal-crow/Dark-Souls-1-Overhaul) phantom-limit
+patch, re-implemented on mctde-Link's own reversible patch engine (with parameterization,
+verification, logging, and restore-on-teardown). The patch sites, offset facts, and AoB
+patterns are credited to Metal-Crow's original reverse-engineering work.
+
 ## OBS / WebSocket Overlay
 
 The mod can also serve a local browser overlay for OBS or other browser-source tools.

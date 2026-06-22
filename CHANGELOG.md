@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.3.0 - MorePhantoms
+
+- Raises the co-op/invasion phantom cap from 4 to 18.
+- Adds a launch prompt to enable it; disabled by default.
+- Puts you in a separate matchmaking pool with only other MorePhantoms players.
+- Overlay now shows up to 18 players.
+- Enlarges the game's memory pool so larger sessions have room.
+- Won't run alongside Phantom_Break, to avoid a crash.
+- Linux/Proton: the Ask prompt is unsupported — set Mode=On or Off in mctde-link.ini.
+- Special thanks to Metal-Crow for permission to use his reverse engineering and techniques.
+
 ## v0.2.1 - Steam Bendoverlay
 
 - Fixed the Steam overlay colliding with the mod overlay, which could flash the screen white or briefly freeze the game whenever a friend-activity notification appeared. The overlay was opening an extra render pass each frame that re-triggered Steam's notification compositor in a broken render state; it now draws without that extra pass, so Steam composites normally.

@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.1 - Steam Bendoverlay
+
+- Fixed the Steam overlay colliding with the mod overlay, which could flash the screen white or briefly freeze the game whenever a friend-activity notification appeared. The overlay was opening an extra render pass each frame that re-triggered Steam's notification compositor in a broken render state; it now draws without that extra pass, so Steam composites normally.
+- Removed the OK pop-up windows that say "?LeaveName? has returned home" upon a phantom disconnecting. Their connection status will now be represented in the overlay instead.
+
 ## v0.2.0 - Auto-Update
 
 - Added an in-game auto-updater. When a newer version is available, choosing **Yes** on the update prompt now downloads and installs the latest build automatically, then relaunches Dark Souls — no manual download needed.

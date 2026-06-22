@@ -96,6 +96,45 @@ extern "C" __declspec(dllexport) int McTDE_GetOverlayBitmap(
 static IDirect3DDevice9*     g_device = NULL; // the real device we are currently drawing through
 static IDirect3DStateBlock9* g_sb     = NULL;
 static IDirect3DTexture9*    g_tex    = NULL;
+
+// --- Steam-overlay coexistence -------------------------------------------------
+// Steam's GameOverlayRenderer renders by hooking the *real* device's EndScene/Present
+// vtable slots (a shared vtable, patched in place). The game's own per-frame EndScene
+// already drives Steam's compositor correctly. But our overlay opens a SECOND scene at
+// Present time (DrawOverlayFrame below): that extra EndScene re-fires Steam's compositor
+// a second time per frame -- while we have the raw back buffer bound and a half-applied
+// state block. On fast GPUs that paints the whole surface white for the notification's
+// duration; on slow GPUs the extra GPU sync stalls the pipe for a second or two.
+//
+// Fix: capture the real device's ORIGINAL BeginScene/EndScene function pointers when the
+// device is created (before Steam patches the vtable at its first Present), and use those
+// for our internal scene. Steam's hook then never sees our extra scene -- it only composites
+// on the game's legitimate EndScene, in its correct context. Present is intentionally left
+// alone so Steam still draws its notification normally.
+typedef HRESULT (STDMETHODCALLTYPE *Scene_t)(IDirect3DDevice9*);
+static const int VT_DEV_BEGINSCENE = 41; // IDirect3DDevice9::BeginScene
+static const int VT_DEV_ENDSCENE   = 42; // IDirect3DDevice9::EndScene
+static IDirect3DDevice9* g_rawDev        = NULL; // device the raw pointers below belong to
+static Scene_t           g_rawBeginScene = NULL;
+static Scene_t           g_rawEndScene   = NULL;
+static volatile LONG     g_inDraw        = 0;     // re-entrancy guard for DrawOverlayFrame
+
+// Snapshot the real device's pristine BeginScene/EndScene before any overlay (Steam) patches
+// the shared vtable. Called from the CreateDevice hook with the real device, pre-wrap.
+void D3DOverlay_CaptureRawScene(void* realDevice)
+{
+    if (!realDevice) return;
+    IDirect3DDevice9* dev = (IDirect3DDevice9*)realDevice;
+    // Capture once: the earliest device most likely predates Steam's vtable patch, and the
+    // real BeginScene/EndScene addresses are shared by every device d3d9.dll hands out, so a
+    // single snapshot stays valid across Reset and device recreation. Re-capturing later could
+    // instead grab Steam's already-installed hook.
+    if (g_rawBeginScene && g_rawEndScene) { g_rawDev = dev; return; }
+    void** vt = *(void***)dev;
+    g_rawDev        = dev;
+    g_rawBeginScene = (Scene_t)vt[VT_DEV_BEGINSCENE];
+    g_rawEndScene   = (Scene_t)vt[VT_DEV_ENDSCENE];
+}
 static int  g_texW = 0, g_texH = 0;
 static int  g_drawW = 0, g_drawH = 0, g_drawCorner = 0, g_drawPadX = 0, g_drawPadY = 0;
 static bool g_hasDraw = false;
@@ -214,35 +253,61 @@ static void DrawQuad(IDirect3DDevice9* dev)
 
 // Draw the overlay onto the real back buffer that is about to be flipped. Called from the
 // wrapper's Present, after DSFix has composited its frame -- so the overlay lands on top.
+// BeginScene/EndScene that bypass any installed vtable hook (Steam) -- see the
+// D3DOverlay_CaptureRawScene comment above. Falls back to the normal call if we never
+// captured a raw pointer for this device (e.g. a device we didn't create the wrapper for).
+static HRESULT RawBeginScene(IDirect3DDevice9* dev)
+{
+    if (dev == g_rawDev && g_rawBeginScene) return g_rawBeginScene(dev);
+    return dev->BeginScene();
+}
+static HRESULT RawEndScene(IDirect3DDevice9* dev)
+{
+    if (dev == g_rawDev && g_rawEndScene) return g_rawEndScene(dev);
+    return dev->EndScene();
+}
+
 static void DrawOverlayFrame(IDirect3DDevice9* dev)
 {
     if (!g_enabled || !dev) return;
     if (dev->TestCooperativeLevel() != D3D_OK) return;
 
+    // Re-entrancy guard: if an overlay's hook (Steam) ends up calling back into our Present
+    // while we're mid-draw, don't recurse and stack a second overlay pass.
+    if (InterlockedCompareExchange(&g_inDraw, 1, 0) != 0) return;
+
     if (dev != g_device) { ReleaseObjs(); g_device = dev; }
     if (!g_sb) dev->CreateStateBlock(D3DSBT_ALL, &g_sb);
-    if (!g_sb) return;
+    if (!g_sb) { InterlockedExchange(&g_inDraw, 0); return; }
 
     PullAndUpload(dev);
-    if (!g_hasDraw) return; // nothing to draw this frame
+    if (!g_hasDraw) { InterlockedExchange(&g_inDraw, 0); return; } // nothing to draw this frame
 
     IDirect3DSurface9* bb = NULL;
-    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb) return;
+    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb)) || !bb)
+    {
+        InterlockedExchange(&g_inDraw, 0);
+        return;
+    }
     IDirect3DSurface9* oldRT = NULL;
     dev->GetRenderTarget(0, &oldRT);
     if (SUCCEEDED(dev->SetRenderTarget(0, bb)))
     {
-        if (SUCCEEDED(dev->BeginScene()))
+        // RawBeginScene/RawEndScene bypass Steam's EndScene hook so our extra scene never
+        // re-fires its compositor in this abnormal render-target/state context.
+        if (SUCCEEDED(RawBeginScene(dev)))
         {
             g_sb->Capture();
             DrawQuad(dev);
             g_sb->Apply();
-            dev->EndScene();
+            RawEndScene(dev);
         }
         if (oldRT) dev->SetRenderTarget(0, oldRT);
     }
     if (oldRT) oldRT->Release();
     bb->Release();
+
+    InterlockedExchange(&g_inDraw, 0);
 }
 
 // ------------------------------------------------------------
@@ -451,6 +516,10 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateDevice(
     HRESULT hr = g_origCreateDevice(self, adapter, type, focus, flags, pp, ppDevice);
     if (SUCCEEDED(hr) && ppDevice && *ppDevice)
     {
+        // Snapshot the real device's pristine BeginScene/EndScene now, before Steam's overlay
+        // patches the shared vtable (it does so lazily, at its first Present). Our in-Present
+        // overlay then opens its extra scene without re-firing Steam's compositor.
+        D3DOverlay_CaptureRawScene(*ppDevice);
         *ppDevice = new MctdeDevice(*ppDevice); // hand the caller (DSFix) our wrapper
         WriteHubLog("[overlay] CreateDevice wrapped (overlay is inner to DSFix).");
     }

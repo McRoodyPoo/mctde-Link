@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdarg.h>
 #include <string>
 #include <vector>
@@ -265,6 +266,7 @@ struct OverlayRow
     ULONGLONG learnedAgeMs = 0;
     int stickyRoute = 0;
     ULONGLONG stickyRouteAgeMs = 0;
+    bool disconnected = false; // synthetic placeholder: player left the session without dying
 };
 
 static HINSTANCE g_hInstance = NULL;
@@ -272,6 +274,10 @@ static HWND g_overlayWnd = NULL;
 static HWND g_gameWnd = NULL;
 static HWND g_overlayOwnerWnd = NULL;
 static volatile bool g_running = true;
+// Anti-zombie watchdog: when the game window is destroyed (game closing), force a clean
+// process exit so the overlay's background threads can't keep DARKSOULS.exe alive.
+// [Settings] ExitWithGame=0 disables it.
+static bool g_exitWithGame = true;
 
 static CRITICAL_SECTION g_rowsLock;
 static bool g_rowsLockReady = false;
@@ -357,6 +363,21 @@ static bool g_debugP2PBridge = true;
 static bool g_showUnknownWorldRows = true;
 static bool g_showPing = true;
 static bool g_showHp = true;
+// Display-only element toggles ([Overlay] section). These hide elements in the overlay
+// without touching the underlying subsystems: [HP] Enabled still gates HP polling, so
+// ShowHp=0 only removes the HP column from the drawn overlay.
+static bool g_showHpField = true;     // [Overlay] ShowHp
+static bool g_showName = true;        // [Overlay] ShowName
+static bool g_showLocalMarker = true; // [Overlay] ShowLocalMarker
+static bool g_showDisconnected = true;// [Overlay] ShowDisconnected: keep a "Disconnected" row
+                                      // for a player who leaves without dying, until replaced.
+// Master overlay visibility, toggled live by the hotkey. Not persisted to the INI.
+static volatile bool g_overlayVisible = true;
+// Virtual-key code for the master toggle. [Overlay] ToggleKey (default VK_F3 = 0x72).
+static int g_toggleKey = VK_F3;
+// Optional modifier that must be held with the toggle key (0 = none). [Overlay] ToggleModifier.
+// Defaults to Shift so the bind is Shift+F3, which avoids DSFix's hotkeys.
+static int g_toggleModifier = VK_SHIFT;
 static bool g_hpAutoScan = false;
 static int g_hpPollMs = 1;
 static bool g_hpDetectInstantRefill = true;
@@ -404,6 +425,7 @@ static void* g_hpWriteEbx_00E68981_Trampoline = NULL;
 static void* g_hpWriteEbx_00E68991_Trampoline = NULL;
 static void* g_recallMenuEvent_00D74950_Trampoline = NULL;
 static void* g_requestPopup_00D4C190_Trampoline = NULL;
+
 static bool g_hooksInstalled = false;
 
 typedef void* (__cdecl* SteamNetworkingThunkFn)();
@@ -972,6 +994,8 @@ static void LoadConfig(bool logIt)
         D3DOverlay_SetEnabled(g_renderBackend == 1);
     }
 
+    g_exitWithGame = GetPrivateProfileIntA("Settings", "ExitWithGame", 1, g_iniPath) != 0;
+
     GetPrivateProfileStringA("Overlay", "FontFace", "Tahoma", g_fontFace, sizeof(g_fontFace), g_iniPath);
     TrimString(g_fontFace);
     if (g_fontFace[0] == 0)
@@ -1009,10 +1033,35 @@ static void LoadConfig(bool logIt)
     g_forceTopmost = GetPrivateProfileIntA("Overlay", "ForceTopmost", 0, g_iniPath) != 0;
     g_showUnknownWorldRows = GetPrivateProfileIntA("Overlay", "ShowUnknownWorldRows", 1, g_iniPath) != 0;
 
-    // Ping source is still the existing connection table, not a true RTT hook yet.
-    // v31 forces the metadata column on; unavailable rows still show ---MS.
-    // This avoids old INI files with ShowPing=0 silently hiding the column.
-    g_showPing = true;
+    // Per-element display toggles. These only control what the overlay draws; the
+    // underlying ping/HP subsystems keep running so toggling is instant and reversible.
+    g_showPing = GetPrivateProfileIntA("Overlay", "ShowPing", 1, g_iniPath) != 0;
+    g_showName = GetPrivateProfileIntA("Overlay", "ShowName", 1, g_iniPath) != 0;
+    g_showHpField = GetPrivateProfileIntA("Overlay", "ShowHp", 1, g_iniPath) != 0;
+    g_showLocalMarker = GetPrivateProfileIntA("Overlay", "ShowLocalMarker", 1, g_iniPath) != 0;
+    g_showDisconnected = GetPrivateProfileIntA("Overlay", "ShowDisconnected", 1, g_iniPath) != 0;
+
+    // Master overlay toggle hotkey. Accepts decimal or hex (e.g. 119 or 0x77) virtual-key codes.
+    {
+        char toggleKey[32];
+        ZeroMemory(toggleKey, sizeof(toggleKey));
+        GetPrivateProfileStringA("Overlay", "ToggleKey", "0x72", toggleKey, sizeof(toggleKey), g_iniPath);
+        TrimString(toggleKey);
+        int vk = (int)strtol(toggleKey, NULL, 0);
+        if (vk <= 0 || vk > 255)
+            vk = VK_F3;
+        g_toggleKey = vk;
+
+        // Optional modifier (Shift/Ctrl/Alt) that must be held with the key. 0 = none.
+        char toggleMod[32];
+        ZeroMemory(toggleMod, sizeof(toggleMod));
+        GetPrivateProfileStringA("Overlay", "ToggleModifier", "0x10", toggleMod, sizeof(toggleMod), g_iniPath);
+        TrimString(toggleMod);
+        int mod = (int)strtol(toggleMod, NULL, 0);
+        if (mod < 0 || mod > 255)
+            mod = 0;
+        g_toggleModifier = mod;
+    }
 
     // HP is read from the live WORLD actor rows and updated by a separate 60 Hz thread.
     // Defaults are 0x3E8/0x3EC. Override these in decimal if testing shows a different offset.
@@ -1108,7 +1157,7 @@ static void LoadConfig(bool logIt)
     if (logIt)
     {
         WriteLogf(
-            "Config: corner='%s' parsed=%s padding=(%d,%d) refresh=%d font='%s' fontHeight=%d hpFontHeight=%d lineHeight=%d hideLocal=%d showHeader=%d topmost=%d showUnknown=%d showPing=%d showHp=%d hpPollMs=%d hpOff=%d/%d hpAuto=%d oneHpLinger=%lu instantRefill=%d instantGain=%d oldPing=forever dump=%d p2p=%d ttl=%lu truePing=%d sendEnabled=%d recvEnabled=%d ch=%d allowGameCh=%d sendMs=%d helloMs=%d staleMs=%d sendType=%d verbose=%d sourceMarker=%d smooth=%d smoothWeight=%d displayMode=%d bestWindow=%d pollSleepMs=%d highResTimer=%d",
+            "Config: corner='%s' parsed=%s padding=(%d,%d) refresh=%d font='%s' fontHeight=%d hpFontHeight=%d lineHeight=%d hideLocal=%d showHeader=%d topmost=%d showUnknown=%d showPing=%d showHp=%d showName=%d showHpField=%d showLocalMarker=%d toggleKey=0x%02X toggleMod=0x%02X hpPollMs=%d hpOff=%d/%d hpAuto=%d oneHpLinger=%lu instantRefill=%d instantGain=%d oldPing=forever dump=%d p2p=%d ttl=%lu truePing=%d sendEnabled=%d recvEnabled=%d ch=%d allowGameCh=%d sendMs=%d helloMs=%d staleMs=%d sendType=%d verbose=%d sourceMarker=%d smooth=%d smoothWeight=%d displayMode=%d bestWindow=%d pollSleepMs=%d highResTimer=%d",
             corner,
             g_cornerText,
             g_paddingX,
@@ -1124,6 +1173,11 @@ static void LoadConfig(bool logIt)
             g_showUnknownWorldRows ? 1 : 0,
             g_showPing ? 1 : 0,
             g_showHp ? 1 : 0,
+            g_showName ? 1 : 0,
+            g_showHpField ? 1 : 0,
+            g_showLocalMarker ? 1 : 0,
+            g_toggleKey,
+            g_toggleModifier,
             g_hpPollMs,
             g_hpCurrentOffset,
             g_hpMaxOffset,
@@ -3665,6 +3719,86 @@ static bool OverlayRosterChanged(const std::vector<OverlayRow>& rows, const std:
     return false;
 }
 
+// Stable per-player key for tracking across refreshes: SteamID if known, else name, else slot.
+static std::string OverlayRowKey(const OverlayRow& r)
+{
+    if (r.steamId != 0)
+        return std::string("s") + std::to_string((unsigned long long)r.steamId);
+    if (!r.name.empty())
+        return std::string("n") + r.name;
+    return std::string("p") + std::to_string(r.playerNo);
+}
+
+// Turn players who left the session WITHOUT dying into persistent "Disconnected" placeholder
+// rows. A placeholder is kept until that player reconnects (their real row returns) or a
+// newcomer joins (which consumes the oldest placeholder, "replacing" it). Pure overlay state:
+// `previousRows` is last frame's g_rows (which already carries any placeholders), `rows` is the
+// freshly built live roster; surviving placeholders are appended to `rows`.
+static void ApplyDisconnectedRows(std::vector<OverlayRow>& rows, const std::vector<OverlayRow>& previousRows)
+{
+    if (!g_showDisconnected)
+        return;
+
+    std::unordered_set<std::string> liveKeys;
+    for (size_t i = 0; i < rows.size(); i++)
+        liveKeys.insert(OverlayRowKey(rows[i]));
+
+    // Carry forward existing placeholders, dropping any whose player is live again.
+    std::vector<OverlayRow> placeholders;
+    std::unordered_set<std::string> placeholderKeys;
+    for (size_t i = 0; i < previousRows.size(); i++)
+    {
+        if (!previousRows[i].disconnected)
+            continue;
+        std::string k = OverlayRowKey(previousRows[i]);
+        if (liveKeys.count(k) || placeholderKeys.count(k))
+            continue;
+        placeholders.push_back(previousRows[i]);
+        placeholderKeys.insert(k);
+    }
+
+    // New departures: previously-live (real) players no longer present and not killed.
+    std::unordered_set<std::string> prevRealKeys;
+    for (size_t i = 0; i < previousRows.size(); i++)
+    {
+        const OverlayRow& pr = previousRows[i];
+        if (pr.disconnected)
+            continue;
+        std::string k = OverlayRowKey(pr);
+        prevRealKeys.insert(k);
+        if (liveKeys.count(k) || placeholderKeys.count(k))
+            continue;
+        if (pr.isLocal || pr.name.empty())
+            continue;                       // never placeholder the local player / nameless rows
+        if (pr.hasHp && pr.hp <= 0)
+            continue;                       // died -> not a disconnect
+
+        OverlayRow ph;
+        ph.name = pr.name;
+        ph.worldName = pr.worldName;
+        ph.steamId = pr.steamId;
+        ph.playerNo = pr.playerNo;
+        ph.hasName = pr.hasName;
+        ph.disconnected = true;
+        placeholders.push_back(ph);
+        placeholderKeys.insert(k);
+    }
+
+    // Each newcomer (live now, not previously live) consumes the oldest placeholder.
+    int newcomers = 0;
+    for (size_t i = 0; i < rows.size(); i++)
+        if (!prevRealKeys.count(OverlayRowKey(rows[i])))
+            newcomers++;
+    while (newcomers > 0 && !placeholders.empty())
+    {
+        placeholders.erase(placeholders.begin());
+        newcomers--;
+    }
+
+    for (size_t i = 0; i < placeholders.size(); i++)
+        rows.push_back(placeholders[i]);
+}
+
 static void StabilizeRowsWithPrevious(std::vector<OverlayRow>& rows, const std::vector<OverlayRow>& previousRows, bool rosterChanged)
 {
     if (previousRows.empty())
@@ -4795,6 +4929,13 @@ static void DrawTextOutlineHpOneBold(HDC hdc, int x, int y, const char* text)
 
 static void DrawOverlayName(HDC hdc, int x, int y, const OverlayRow& row, const char* text)
 {
+    if (row.disconnected)
+    {
+        // Disconnected placeholder row: muted gray text, black outline.
+        DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), RGB(150, 150, 150), text);
+        return;
+    }
+
     if (LiveChrTeamStyleKindForRow(row) == STICKY_ROUTE_HOST_LIVE_TYPE)
     {
         // Live ChrType/TeamType was changed to human/hollow host appearance.
@@ -5047,13 +5188,17 @@ static void PaintOverlay(HWND hwnd)
     // Wide enough for the largest prefix we draw: 999MS(C).
     // Local \[T]/ is centered inside this same field so it no longer hugs the left edge.
     SelectObject(hdc, smallFont);
-    GetTextExtentPoint32A(hdc, "999MS(C)", 8, &markerMaxSize);
+    if (g_showPing)
+        GetTextExtentPoint32A(hdc, "999MS(C)", 8, &markerMaxSize);
 
-    SIZE localMarkerMaxSize;
-    ZeroMemory(&localMarkerMaxSize, sizeof(localMarkerMaxSize));
-    GetTextExtentPoint32A(hdc, "\\[T]/", 5, &localMarkerMaxSize);
-    if (localMarkerMaxSize.cx > markerMaxSize.cx)
-        markerMaxSize.cx = localMarkerMaxSize.cx;
+    if (g_showLocalMarker)
+    {
+        SIZE localMarkerMaxSize;
+        ZeroMemory(&localMarkerMaxSize, sizeof(localMarkerMaxSize));
+        GetTextExtentPoint32A(hdc, "\\[T]/", 5, &localMarkerMaxSize);
+        if (localMarkerMaxSize.cx > markerMaxSize.cx)
+            markerMaxSize.cx = localMarkerMaxSize.cx;
+    }
 
     std::vector<OverlayRow> rows;
 
@@ -5081,8 +5226,12 @@ static void PaintOverlay(HWND hwnd)
     // v80: keep the v79 centered-gutter layout, but shrink the gutter.
     // v79 centered correctly but left too much space on both sides of the marker.
     // MarkerGutterExtra can be tuned in the INI without rebuilding.
-    int hpFieldWidth = hpMaxSize.cx + 6;
-    int markerGutterWidth = markerMaxSize.cx + g_markerGutterExtra;
+    // HP column is gated by [HP] Enabled (subsystem) AND [Overlay] ShowHp (display).
+    bool drawHpField = g_showHp && g_showHpField;
+    // The marker gutter collapses to zero when neither marker can ever appear.
+    bool anyMarker = g_showPing || g_showLocalMarker;
+    int hpFieldWidth = drawHpField ? (hpMaxSize.cx + 6) : 0;
+    int markerGutterWidth = anyMarker ? (markerMaxSize.cx + g_markerGutterExtra) : 0;
     int widthEstimate = hpFieldWidth + markerGutterWidth + 360;
     int totalLines = (int)rows.size();
 
@@ -5124,7 +5273,8 @@ static void PaintOverlay(HWND hwnd)
     if (y < g_paddingY)
         y = g_paddingY;
 
-    for (size_t i = 0; i < rows.size(); i++)
+    // Master hotkey toggle: skip all row drawing but still blit the cleared buffer.
+    for (size_t i = 0; g_overlayVisible && i < rows.size(); i++)
     {
         const OverlayRow& row = rows[i];
 
@@ -5160,23 +5310,38 @@ static void PaintOverlay(HWND hwnd)
         else
             wsprintfA(markerLine, "%sMS%s", pingText, pingSourceText);
 
+        if (row.disconnected)
+        {
+            // Placeholder for a player who left without dying: "Disconnected    ---MS    Name".
+            lstrcpyA(hpLine, "Disconnected");
+            lstrcpyA(markerLine, "---MS");
+        }
+
         int hpY = y + ((lineHeight - hpTm.tmHeight) / 2);
         int smallY = y + ((lineHeight - smallTm.tmHeight) / 2);
         int markerGutterX = x + hpFieldWidth;
         int nameX = markerGutterX + markerGutterWidth;
 
-        SelectObject(hdc, hpFont);
-        DrawOverlayHp(hdc, x, hpY, row, hpLine);
+        if (drawHpField)
+        {
+            SelectObject(hdc, hpFont);
+            DrawOverlayHp(hdc, x, hpY, row, hpLine);
+        }
 
         SelectObject(hdc, smallFont);
 
-        SIZE markerSize;
-        ZeroMemory(&markerSize, sizeof(markerSize));
-        GetTextExtentPoint32A(hdc, markerLine, lstrlenA(markerLine), &markerSize);
-        int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
+        bool drawMarker = row.isLocal ? g_showLocalMarker : g_showPing;
+        if (drawMarker)
+        {
+            SIZE markerSize;
+            ZeroMemory(&markerSize, sizeof(markerSize));
+            GetTextExtentPoint32A(hdc, markerLine, lstrlenA(markerLine), &markerSize);
+            int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
+            DrawOverlayName(hdc, markerX, smallY, row, markerLine);
+        }
 
-        DrawOverlayName(hdc, markerX, smallY, row, markerLine);
-        DrawOverlayName(hdc, nameX, smallY, row, nameLine);
+        if (g_showName)
+            DrawOverlayName(hdc, nameX, smallY, row, nameLine);
 
         y += lineHeight;
     }
@@ -6043,11 +6208,19 @@ static DWORD WINAPI PollThread(LPVOID)
             LeaveCriticalSection(&g_rowsLock);
         }
 
-        bool rosterChanged = OverlayRosterChanged(rows, previousRows);
+        // Stabilization/roster-change compares against real (live) rows only, so the synthetic
+        // "Disconnected" placeholders carried in g_rows don't churn the comparison every refresh.
+        std::vector<OverlayRow> previousReal;
+        previousReal.reserve(previousRows.size());
+        for (size_t i = 0; i < previousRows.size(); i++)
+            if (!previousRows[i].disconnected)
+                previousReal.push_back(previousRows[i]);
 
-        StabilizeRowsWithPrevious(rows, previousRows, rosterChanged);
+        bool rosterChanged = OverlayRosterChanged(rows, previousReal);
+
+        StabilizeRowsWithPrevious(rows, previousReal, rosterChanged);
         ApplyTruePingToRows(rows);
-        StabilizeRowsWithPrevious(rows, previousRows, rosterChanged);
+        StabilizeRowsWithPrevious(rows, previousReal, rosterChanged);
 
         DumpDebugRows(rows, worldRows, nodesById);
 
@@ -6089,6 +6262,9 @@ static DWORD WINAPI PollThread(LPVOID)
                     ++it;
             }
 
+            // Carry/forward "Disconnected" placeholder rows (left-without-dying), append survivors.
+            ApplyDisconnectedRows(rows, previousRows);
+
             g_rows = rows;
             g_worldRows = worldRows;
             LeaveCriticalSection(&g_rowsLock);
@@ -6121,6 +6297,9 @@ static DWORD WINAPI HpPollThread(LPVOID)
             for (size_t i = 0; i < g_rows.size(); i++)
             {
                 OverlayRow& row = g_rows[i];
+
+                if (row.disconnected)
+                    continue; // placeholder row: no live HP to poll
 
                 int oldHp = row.hp;
                 int oldHpMax = row.hpMax;
@@ -6184,6 +6363,13 @@ static DWORD WINAPI HpPollThread(LPVOID)
 // ------------------------------------------------------------
 static void RenderOverlayToDIBAndSubmit()
 {
+    // Master hotkey toggle: submit an empty bitmap so the in-frame overlay clears.
+    if (!g_overlayVisible)
+    {
+        D3DOverlay_Submit(NULL, 0, 0, (int)g_corner, g_paddingX, g_paddingY);
+        return;
+    }
+
     std::vector<OverlayRow> rows;
     if (g_rowsLockReady)
     {
@@ -6233,39 +6419,61 @@ static void RenderOverlayToDIBAndSubmit()
     GetTextMetricsA(hdc, &hpTm);
     SIZE hpMaxSize; ZeroMemory(&hpMaxSize, sizeof(hpMaxSize));
     GetTextExtentPoint32A(hdc, "9999HP", 6, &hpMaxSize);
+    // Disconnected placeholder rows render "Disconnected" in the HP column; widen it to fit.
+    for (size_t di = 0; di < rows.size(); di++)
+    {
+        if (rows[di].disconnected)
+        {
+            SIZE dcSize; ZeroMemory(&dcSize, sizeof(dcSize));
+            GetTextExtentPoint32A(hdc, "Disconnected", 12, &dcSize);
+            if (dcSize.cx > hpMaxSize.cx) hpMaxSize.cx = dcSize.cx;
+            break;
+        }
+    }
 
     SelectObject(hdc, smallFont);
     TEXTMETRICA smallTm; ZeroMemory(&smallTm, sizeof(smallTm));
     GetTextMetricsA(hdc, &smallTm);
     SIZE markerMaxSize; ZeroMemory(&markerMaxSize, sizeof(markerMaxSize));
-    GetTextExtentPoint32A(hdc, "999MS(C)", 8, &markerMaxSize);
-    SIZE localMarkerMaxSize; ZeroMemory(&localMarkerMaxSize, sizeof(localMarkerMaxSize));
-    GetTextExtentPoint32A(hdc, "\\[T]/", 5, &localMarkerMaxSize);
-    if (localMarkerMaxSize.cx > markerMaxSize.cx)
-        markerMaxSize.cx = localMarkerMaxSize.cx;
+    if (g_showPing)
+        GetTextExtentPoint32A(hdc, "999MS(C)", 8, &markerMaxSize);
+    if (g_showLocalMarker)
+    {
+        SIZE localMarkerMaxSize; ZeroMemory(&localMarkerMaxSize, sizeof(localMarkerMaxSize));
+        GetTextExtentPoint32A(hdc, "\\[T]/", 5, &localMarkerMaxSize);
+        if (localMarkerMaxSize.cx > markerMaxSize.cx)
+            markerMaxSize.cx = localMarkerMaxSize.cx;
+    }
 
     int lineHeight = g_lineHeight;
     if (lineHeight < hpTm.tmHeight + 2)
         lineHeight = hpTm.tmHeight + 2;
 
-    int hpFieldWidth = hpMaxSize.cx + 6;
-    int markerGutterWidth = markerMaxSize.cx + g_markerGutterExtra;
+    // HP column is gated by [HP] Enabled (subsystem) AND [Overlay] ShowHp (display).
+    bool drawHpField = g_showHp && g_showHpField;
+    // The marker gutter collapses to zero when neither marker can ever appear.
+    bool anyMarker = g_showPing || g_showLocalMarker;
+    int hpFieldWidth = drawHpField ? (hpMaxSize.cx + 6) : 0;
+    int markerGutterWidth = anyMarker ? (markerMaxSize.cx + g_markerGutterExtra) : 0;
     int nameX = hpFieldWidth + markerGutterWidth;
     int totalLines = (int)rows.size();
     int blockHeight = totalLines * lineHeight;
 
     // Measure the widest name so the bitmap is sized tightly (no clipping).
     int maxNameWidth = 0;
-    for (size_t i = 0; i < rows.size(); i++)
+    if (g_showName)
     {
-        const char* nm = rows[i].name.c_str();
-        int len = lstrlenA(nm);
-        if (len <= 0)
-            continue;
-        SIZE ns; ZeroMemory(&ns, sizeof(ns));
-        GetTextExtentPoint32A(hdc, nm, len, &ns);
-        if (ns.cx > maxNameWidth)
-            maxNameWidth = ns.cx;
+        for (size_t i = 0; i < rows.size(); i++)
+        {
+            const char* nm = rows[i].name.c_str();
+            int len = lstrlenA(nm);
+            if (len <= 0)
+                continue;
+            SIZE ns; ZeroMemory(&ns, sizeof(ns));
+            GetTextExtentPoint32A(hdc, nm, len, &ns);
+            if (ns.cx > maxNameWidth)
+                maxNameWidth = ns.cx;
+        }
     }
 
     int contentW = nameX + maxNameWidth + 8;
@@ -6330,20 +6538,36 @@ static void RenderOverlayToDIBAndSubmit()
             else
                 wsprintfA(markerLine, "%sMS%s", pingText, pingSourceText);
 
+            if (row.disconnected)
+            {
+                // Placeholder for a player who left without dying: "Disconnected    ---MS    Name".
+                lstrcpyA(hpLine, "Disconnected");
+                lstrcpyA(markerLine, "---MS");
+            }
+
             int hpY = y + ((lineHeight - hpTm.tmHeight) / 2);
             int smallY = y + ((lineHeight - smallTm.tmHeight) / 2);
             int markerGutterX = x + hpFieldWidth;
 
-            SelectObject(hdc, hpFont);
-            DrawOverlayHp(hdc, x, hpY, row, hpLine);
+            if (drawHpField)
+            {
+                SelectObject(hdc, hpFont);
+                DrawOverlayHp(hdc, x, hpY, row, hpLine);
+            }
 
             SelectObject(hdc, smallFont);
-            SIZE markerSize; ZeroMemory(&markerSize, sizeof(markerSize));
-            GetTextExtentPoint32A(hdc, markerLine, lstrlenA(markerLine), &markerSize);
-            int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
 
-            DrawOverlayName(hdc, markerX, smallY, row, markerLine);
-            DrawOverlayName(hdc, nameX, smallY, row, nameLine);
+            bool drawMarker = row.isLocal ? g_showLocalMarker : g_showPing;
+            if (drawMarker)
+            {
+                SIZE markerSize; ZeroMemory(&markerSize, sizeof(markerSize));
+                GetTextExtentPoint32A(hdc, markerLine, lstrlenA(markerLine), &markerSize);
+                int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
+                DrawOverlayName(hdc, markerX, smallY, row, markerLine);
+            }
+
+            if (g_showName)
+                DrawOverlayName(hdc, nameX, smallY, row, nameLine);
 
             y += lineHeight;
         }
@@ -6467,6 +6691,109 @@ static DWORD WINAPI OverlayThread(LPVOID)
     return 0;
 }
 
+// Polls the configured virtual-key and flips g_overlayVisible on a rising edge.
+// Only fires while the game window is focused so the bind never triggers while the
+// user is alt-tabbed and typing elsewhere.
+static DWORD WINAPI HotkeyThread(LPVOID)
+{
+    WriteLogLine("Hotkey thread started.");
+    bool prevDown = false;
+    while (g_running)
+    {
+        int key = g_toggleKey;
+        if (key > 0 && key <= 255)
+        {
+            bool down = (GetAsyncKeyState(key) & 0x8000) != 0;
+
+            bool gameFocused = false;
+            HWND fg = GetForegroundWindow();
+            if (fg != NULL)
+            {
+                DWORD fgPid = 0;
+                GetWindowThreadProcessId(fg, &fgPid);
+                gameFocused = (fgPid == GetCurrentProcessId());
+            }
+
+            // Optional modifier must be held at the moment the key goes down.
+            bool modOk = (g_toggleModifier <= 0) ||
+                ((GetAsyncKeyState(g_toggleModifier) & 0x8000) != 0);
+
+            if (down && !prevDown && gameFocused && modOk)
+            {
+                g_overlayVisible = !g_overlayVisible;
+                WriteLogf("Overlay toggled %s via hotkey (vk=0x%02X mod=0x%02X).",
+                    g_overlayVisible ? "ON" : "OFF", key, g_toggleModifier);
+            }
+            prevDown = down;
+        }
+        else
+        {
+            prevDown = false;
+        }
+        Sleep(30);
+    }
+    WriteLogLine("Hotkey thread stopped.");
+    return 0;
+}
+
+// Anti-zombie watchdog. DS1 (with DSFix + this mod's background threads) can leave a lingering
+// DARKSOULS.exe after the window closes if the game doesn't fully ExitProcess. Once we've seen
+// the game window, we watch it; when it's destroyed AND no game window can be found for a few
+// consecutive seconds (i.e. the game is really closing, not minimized or briefly recreated),
+// we force a clean process exit. IsWindow() stays true while minimized, so this won't fire then.
+static DWORD WINAPI WatchdogThread(LPVOID)
+{
+    WriteLogLine("Watchdog thread started.");
+
+    HWND gw = NULL;
+    while (g_running && gw == NULL)
+    {
+        gw = FindGameWindow();
+        if (gw == NULL)
+            Sleep(750);
+    }
+    if (!g_running)
+        return 0;
+
+    WriteLogf("Watchdog: tracking game window %08X", (DWORD)(uintptr_t)gw);
+
+    int goneStreak = 0;
+    while (g_running)
+    {
+        Sleep(1000);
+
+        if (!g_exitWithGame)
+        {
+            goneStreak = 0;
+            continue;
+        }
+
+        if (IsWindow(gw))           // true even while minimized; false only once destroyed
+        {
+            goneStreak = 0;
+            continue;
+        }
+
+        HWND again = FindGameWindow();
+        if (again != NULL)          // game recreated its window -> keep tracking the new one
+        {
+            gw = again;
+            goneStreak = 0;
+            continue;
+        }
+
+        if (++goneStreak >= 3)      // ~3s with no game window at all -> game is closing
+        {
+            WriteLogLine("Watchdog: game window gone; forcing process exit to avoid a zombie process.");
+            g_running = false;
+            ExitProcess(0);
+        }
+    }
+
+    WriteLogLine("Watchdog thread stopped.");
+    return 0;
+}
+
 static DWORD WINAPI DelayedStartThread(LPVOID)
 {
     WriteLogLine("Delayed start thread started. Sleeping before overlay init.");
@@ -6509,6 +6836,14 @@ static DWORD WINAPI DelayedStartThread(LPVOID)
     HANDLE truePing = CreateThread(NULL, 0, TruePingThread, NULL, 0, NULL);
     if (truePing)
         CloseHandle(truePing);
+
+    HANDLE hotkey = CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
+    if (hotkey)
+        CloseHandle(hotkey);
+
+    HANDLE watchdog = CreateThread(NULL, 0, WatchdogThread, NULL, 0, NULL);
+    if (watchdog)
+        CloseHandle(watchdog);
 
     StartWebSocketServer();
 

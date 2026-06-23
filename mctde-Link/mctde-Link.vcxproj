@@ -104,6 +104,9 @@
     <ClCompile Include="PhantomUnleashedStage2.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ResourceCompile Include="version.rc" />
+  </ItemGroup>
+  <ItemGroup>
     <Text Include="d3d9.def" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

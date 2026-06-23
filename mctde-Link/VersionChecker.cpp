@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <winhttp.h>
 #include <shellapi.h>
+#include <bcrypt.h>
 
 #include <string>
 #include <fstream>
@@ -9,9 +10,11 @@
 #include <sstream>
 #include <vector>
 #include <cstdlib>
+#include <cctype>
 
 #pragma comment(lib, "winhttp.lib")
 #pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 // Installed versions bundled with this release.
 // Change these every time you release a new version.
@@ -60,6 +63,14 @@
 
 // Where the "No" button (and any auto-update fallback) sends the user.
 #define MCTDE_LINK_RELEASES_LATEST_URL "https://github.com/McRoodyPoo/mctde-Link/releases/latest"
+
+// The standalone launcher (separate repo). Fetched, with consent, when it's missing.
+// RELEASE REQUIREMENT: attach "mctde_launcher.exe" to the launcher's GitHub release.
+// OPTIONAL: also attach "mctde_launcher.exe.sha256" (first token = lowercase hex SHA-256)
+// to enable a strict integrity check on top of HTTPS.
+#define MCTDE_LAUNCHER_EXE_URL     L"https://github.com/McRoodyPoo/mctde-Launcher/releases/latest/download/mctde_launcher.exe"
+#define MCTDE_LAUNCHER_SHA256_URL  L"https://github.com/McRoodyPoo/mctde-Launcher/releases/latest/download/mctde_launcher.exe.sha256"
+#define MCTDE_LAUNCHER_RELEASES_URL "https://github.com/McRoodyPoo/mctde-Launcher/releases/latest"
 
 // The update zip URL (MCTDE_LINK_RELEASE_ZIP_URL) is defined per-channel above.
 //
@@ -825,6 +836,194 @@ static bool LaunchUpdater()
     return true;
 }
 
+// ============================================================
+// Launcher fetch (consent + HTTPS + verify)
+// ============================================================
+
+// Downloads an HTTPS URL fully into memory (follows GitHub's release->CDN redirects).
+static bool DownloadToString(const wchar_t* url, std::string& outData)
+{
+    outData.clear();
+
+    URL_COMPONENTS comps;
+    ZeroMemory(&comps, sizeof(comps));
+    comps.dwStructSize = sizeof(comps);
+    wchar_t host[256] = { 0 };
+    wchar_t urlPath[2048] = { 0 };
+    comps.lpszHostName = host;       comps.dwHostNameLength = ARRAYSIZE(host);
+    comps.lpszUrlPath = urlPath;     comps.dwUrlPathLength = ARRAYSIZE(urlPath);
+
+    if (!WinHttpCrackUrl(url, 0, 0, &comps))
+        return false;
+
+    HINTERNET hSession = WinHttpOpen(L"MCTDELauncherFetch/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return false;
+
+    HINTERNET hConnect = WinHttpConnect(hSession, host, comps.nPort, 0);
+    if (!hConnect) { WinHttpCloseHandle(hSession); return false; }
+
+    DWORD flags = (comps.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlPath, NULL, WINHTTP_NO_REFERER,
+                                            WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+    if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return false; }
+
+    bool ok = false;
+    // NOTE: default cert validation is left ON (we never set WINHTTP_OPTION_SECURITY_FLAGS to
+    // ignore errors), so HTTPS authenticity of github.com is the primary trust anchor.
+    if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        WinHttpReceiveResponse(hRequest, NULL))
+    {
+        DWORD status = 0, ssz = sizeof(status);
+        WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX, &status, &ssz, WINHTTP_NO_HEADER_INDEX);
+        if (status == 200)
+        {
+            DWORD size = 0;
+            do {
+                if (!WinHttpQueryDataAvailable(hRequest, &size)) break;
+                if (size == 0) break;
+                std::vector<char> buf(size);
+                DWORD got = 0;
+                if (WinHttpReadData(hRequest, buf.data(), size, &got) && got > 0)
+                    outData.append(buf.data(), got);
+                else
+                    break;
+            } while (size > 0);
+            ok = !outData.empty();
+        }
+        else
+        {
+            WriteLog("Launcher fetch HTTP status " + std::to_string(status));
+        }
+    }
+
+    WinHttpCloseHandle(hRequest);
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+    return ok;
+}
+
+// SHA-256 of a buffer as lowercase hex (BCrypt). "" on failure.
+static std::string Sha256Hex(const std::string& data)
+{
+    BCRYPT_ALG_HANDLE alg = NULL;
+    if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, NULL, 0) != 0)
+        return "";
+
+    DWORD hashLen = 0, cb = 0;
+    BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, (PUCHAR)&hashLen, sizeof(hashLen), &cb, 0);
+    std::vector<UCHAR> hash(hashLen);
+
+    BCRYPT_HASH_HANDLE h = NULL;
+    std::string out;
+    if (BCryptCreateHash(alg, &h, NULL, 0, NULL, 0, 0) == 0)
+    {
+        if (BCryptHashData(h, (PUCHAR)data.data(), (ULONG)data.size(), 0) == 0 &&
+            BCryptFinishHash(h, hash.data(), hashLen, 0) == 0)
+        {
+            static const char* hx = "0123456789abcdef";
+            out.reserve(hashLen * 2);
+            for (UCHAR b : hash) { out += hx[b >> 4]; out += hx[b & 0xF]; }
+        }
+        BCryptDestroyHash(h);
+    }
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return out;
+}
+
+// If the launcher is missing (and the game wasn't started by it), offer to download it from
+// the official GitHub release over HTTPS, verify it, install it, and open it. Consent-gated.
+static void OfferLauncherInstall()
+{
+    char env[8] = { 0 };
+    if (GetEnvironmentVariableA("MCTDE_VIA_LAUNCHER", env, sizeof(env)) > 0 && env[0] == '1')
+        return;   // started by the launcher already
+
+    std::string iniPath = GetVersionIniPath();
+    if (GetPrivateProfileIntA("Launcher", "RequireLauncher", 1, iniPath.c_str()) == 0)
+        return;   // feature disabled
+
+    std::string dir = GetDllDirectory();
+    if (!dir.empty() && dir[dir.size() - 1] != '\\' && dir[dir.size() - 1] != '/') dir += "\\";
+    std::string launcherPath = dir + "mctde_launcher.exe";
+
+    DWORD attr = GetFileAttributesA(launcherPath.c_str());
+    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+        return;   // already installed -- the launcher guard handles enforcement
+
+    int r = MessageBoxA(NULL,
+        "The mctde launcher isn't installed yet.\n\n"
+        "mctde-Link uses a small launcher (mctde_launcher.exe) to apply DSFix and "
+        "PhantomUnleashed options. Download and install it from the official source\n"
+        "github.com/McRoodyPoo/mctde-Launcher (over HTTPS)?\n\n"
+        "Yes  -  Download, verify, install, and open it. Dark Souls will close.\n"
+        "No   -  Continue without it this time.",
+        "Install the mctde launcher?", MB_YESNO | MB_ICONQUESTION | MB_TOPMOST);
+    if (r != IDYES) { WriteLog("User declined launcher install."); return; }
+
+    WriteLog("Downloading launcher from github.com/McRoodyPoo/mctde-Launcher.");
+    std::string bytes;
+    if (!DownloadToString(MCTDE_LAUNCHER_EXE_URL, bytes) ||
+        bytes.size() < 20000 || bytes[0] != 'M' || bytes[1] != 'Z')   // must be a real PE
+    {
+        WriteLog("Launcher download failed or payload was not a valid .exe.");
+        MessageBoxA(NULL,
+            "Couldn't download the launcher.\n\nThe releases page will open so you can grab it manually.",
+            "mctde launcher", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        ShellExecuteA(NULL, "open", MCTDE_LAUNCHER_RELEASES_URL, NULL, NULL, SW_SHOWNORMAL);
+        return;   // leave the game running -- never strand the player
+    }
+
+    // Strict integrity check when a .sha256 sidecar is published alongside the exe.
+    std::string sidecar;
+    if (DownloadToString(MCTDE_LAUNCHER_SHA256_URL, sidecar))
+    {
+        std::string want = Trim(sidecar);
+        size_t sp = want.find_first_of(" \t\r\n");
+        if (sp != std::string::npos) want = want.substr(0, sp);
+        for (size_t i = 0; i < want.size(); ++i) want[i] = (char)tolower((unsigned char)want[i]);
+        std::string got = Sha256Hex(bytes);
+        if (!want.empty() && !got.empty() && want != got)
+        {
+            WriteLog("Launcher SHA-256 mismatch (want " + want + ", got " + got + "); discarding.");
+            MessageBoxA(NULL,
+                "The downloaded launcher failed its integrity check and was discarded.\n\n"
+                "Nothing was installed. Please download it manually.",
+                "mctde launcher", MB_OK | MB_ICONERROR | MB_TOPMOST);
+            ShellExecuteA(NULL, "open", MCTDE_LAUNCHER_RELEASES_URL, NULL, NULL, SW_SHOWNORMAL);
+            return;
+        }
+        WriteLog("Launcher SHA-256 verified.");
+    }
+    else
+    {
+        WriteLog("No SHA-256 sidecar published; relying on HTTPS authenticity + PE check.");
+    }
+
+    std::ofstream out(launcherPath.c_str(), std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) { WriteLog("Could not write launcher to disk."); return; }
+    out.write(bytes.data(), (std::streamsize)bytes.size());
+    out.close();
+    WriteLog("Launcher installed (" + std::to_string(bytes.size()) + " bytes). Opening it and closing the game.");
+
+    STARTUPINFOA si; ZeroMemory(&si, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; ZeroMemory(&pi, sizeof(pi));
+    std::string cmd = "\"" + launcherPath + "\"";
+    std::vector<char> cmdbuf(cmd.begin(), cmd.end());
+    cmdbuf.push_back(0);
+    std::string wd = dir;
+    if (!wd.empty() && (wd[wd.size() - 1] == '\\' || wd[wd.size() - 1] == '/')) wd.erase(wd.size() - 1);
+    if (CreateProcessA(launcherPath.c_str(), cmdbuf.data(), NULL, NULL, FALSE, 0, NULL, wd.c_str(), &si, &pi))
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    Sleep(300);
+    TerminateProcess(GetCurrentProcess(), 0);
+    ExitProcess(0);
+}
+
 // ------------------------------------------------------------
 // This runs after the DLL loads.
 // Do NOT do internet stuff directly inside DllMain.
@@ -834,6 +1033,9 @@ DWORD WINAPI VersionCheckThread(LPVOID)
     WriteLog("----------------------------------------");
     WriteLog("Version checker started.");
     WriteLog("Channel: " MCTDE_LINK_CHANNEL_LABEL);
+
+    // If the launcher is missing, offer to fetch it first (may close the game and open it).
+    OfferLauncherInstall();
 
     std::string latestManifest = DownloadLatestManifest();
 

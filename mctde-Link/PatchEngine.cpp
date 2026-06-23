@@ -12,7 +12,7 @@ namespace mp {
 // ------------------------------------------------------------------ logging
 
 static void DefaultSink(const std::string& msg) {
-    OutputDebugStringA(("[MorePhantoms] " + msg + "\n").c_str());
+    OutputDebugStringA(("[PhantomUnleashed] " + msg + "\n").c_str());
 }
 static void (*g_sink)(const std::string&) = DefaultSink;
 

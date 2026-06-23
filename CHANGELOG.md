@@ -1,10 +1,10 @@
 # Changelog
 
-## v0.3.0 - MorePhantoms
+## v0.3.0 - PhantomUnleashed
 
 - Raises the co-op/invasion phantom cap from 4 to 18.
 - Adds a launch prompt to enable it; disabled by default.
-- Puts you in a separate matchmaking pool with only other MorePhantoms players.
+- Puts you in a separate matchmaking pool with only other PhantomUnleashed players.
 - Overlay now shows up to 18 players.
 - Enlarges the game's memory pool so larger sessions have room.
 - Won't run alongside Phantom_Break, to avoid a crash.

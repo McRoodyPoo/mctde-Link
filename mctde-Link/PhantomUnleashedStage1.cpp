@@ -1,5 +1,5 @@
 /*
-    MorePhantomsStage1  -  mctde-Link (built into d3d9.dll)
+    PhantomUnleashedStage1  -  mctde-Link (built into d3d9.dll)
     Stage 1: static, count-parameterized byte patches.
 
     Based on Metal-Crow's reverse-engineered MultiPhantom / Dark Souls Overhaul patch map
@@ -19,7 +19,7 @@
     immediate (the phantom count, an allocation size, or a bound) changes. That is why
     Verify can compare the live bytes against the leading bytes of our patched form.
 */
-#include "MorePhantomsStage1.h"
+#include "PhantomUnleashedStage1.h"
 #include "PatchEngine.h"
 
 #include <cstdio>
@@ -46,7 +46,7 @@ static void P(uintptr_t rva, std::vector<uint8_t> bytes, size_t verifyLen, const
     g_engine.Stage(g_base + rva, std::move(bytes), verifyLen, note);
 }
 
-bool MorePhantomsStage1_Prepare(const MorePhantomsConfig& cfg) {
+bool PhantomUnleashedStage1_Prepare(const PhantomUnleashedConfig& cfg) {
     if (cfg.maxPhantoms < 4 || cfg.maxPhantoms > 32) {
         Log("Prepare: maxPhantoms must be in [4, 32].");
         return false;
@@ -123,8 +123,8 @@ bool MorePhantomsStage1_Prepare(const MorePhantomsConfig& cfg) {
 
     // -- matchmaking pool key (POOL SEGREGATION) ------------------------------
     // The game pairs players only when this 1-byte network version matches. Vanilla
-    // retail = 0x2E. Writing a MorePhantoms value here puts you in a pool with ONLY
-    // other MorePhantoms players who share the same NetworkVersion. WITHOUT these three
+    // retail = 0x2E. Writing a PhantomUnleashed value here puts you in a pool with ONLY
+    // other PhantomUnleashed players who share the same NetworkVersion. WITHOUT these three
     // patches the cap-raise alone leaves you in the vanilla pool (the bug we just hit).
     // The leading opcode bytes are invariant; only the version immediate changes.
     P(0x7E73FA, { 0xC6, 0x44, 0x24, 0x1C, ver }, 4, "mov [esp+0x1C], NetVer (advertise version)");
@@ -181,8 +181,8 @@ bool MorePhantomsStage1_Prepare(const MorePhantomsConfig& cfg) {
     return true;
 }
 
-int  MorePhantomsStage1_Verify()  { return g_engine.Verify(); }
-bool MorePhantomsStage1_Apply()   { return g_engine.Commit(); }
-void MorePhantomsStage1_Restore() { g_engine.RestoreAll(); }
+int  PhantomUnleashedStage1_Verify()  { return g_engine.Verify(); }
+bool PhantomUnleashedStage1_Apply()   { return g_engine.Commit(); }
+void PhantomUnleashedStage1_Restore() { g_engine.RestoreAll(); }
 
 } // namespace mp

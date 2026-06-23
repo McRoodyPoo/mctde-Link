@@ -1,7 +1,7 @@
 /*
     PatchEngine  -  mctde-Link (built into d3d9.dll)
 
-    A small, reversible in-memory patch framework used by the MorePhantoms module.
+    A small, reversible in-memory patch framework used by the PhantomUnleashed module.
 
     This is a generic patch framework written for mctde-Link (not derived from any other
     project). Design goals:
@@ -22,7 +22,7 @@
 
 namespace mp {
 
-// Logging sink. Set once at startup (see MorePhantoms.cpp). Never null after Init().
+// Logging sink. Set once at startup (see PhantomUnleashed.cpp). Never null after Init().
 void Log(const std::string& message);
 void SetLogSink(void (*sink)(const std::string&));
 

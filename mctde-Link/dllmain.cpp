@@ -7,7 +7,7 @@
 #include <vector>
 #include <algorithm>
 #include "D3DOverlay.h"
-#include "MorePhantoms.h"
+#include "PhantomUnleashed.h"
 
 #ifdef MCTDE_LINK_SINGLE_DLL
 extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule);
@@ -567,7 +567,7 @@ void StartBuiltInModules()
     WriteHubLog("Starting built-in VersionChecker module.");
     McTDE_VersionChecker_Start();
 
-    // NOTE: MorePhantoms is intentionally NOT started here. It must gate synchronously on
+    // NOTE: PhantomUnleashed is intentionally NOT started here. It must gate synchronously on
     // the game's main thread (see Direct3DCreate9 / Direct3DCreate9Ex) so the phantom-cap
     // patches and pool segregation are in place BEFORE the game opens. Starting it on this
     // HubThread would race the game's own startup.
@@ -606,18 +606,64 @@ DWORD WINAPI HubThread(LPVOID)
 }
 
 // ------------------------------------------------------------
+// Launcher guard
+// mctde_launcher.exe sets MCTDE_VIA_LAUNCHER=1 on the game process it spawns. If the game
+// was started WITHOUT the launcher (env var absent), relaunch the launcher and exit, so
+// players always go through it (and DSFix/PhantomUnleashed toggles get applied). Safety:
+// only enforced when mctde_launcher.exe is actually present beside the game, and can be
+// turned off with [Launcher] RequireLauncher=0 in mctde-link.ini.
+// ------------------------------------------------------------
+
+void EnforceLauncherOnce()
+{
+    static volatile LONG done = 0;
+    if (InterlockedExchange(&done, 1) != 0) return;   // run at most once per process
+
+    // Launched by the launcher? Then proceed normally.
+    char env[8] = { 0 };
+    if (GetEnvironmentVariableA("MCTDE_VIA_LAUNCHER", env, sizeof(env)) > 0 && env[0] == '1')
+        return;
+
+    std::string iniPath = GetHubIniPath();
+    if (GetPrivateProfileIntA("Launcher", "RequireLauncher", 1, iniPath.c_str()) == 0)
+        return;   // feature disabled
+
+    std::string launcher = ResolveGamePath("mctde_launcher.exe");
+    DWORD attr = GetFileAttributesA(launcher.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+        return;   // no launcher present -- don't strand the player with no way back in
+
+    WriteHubLog("Game started without the launcher; reopening mctde_launcher.exe and exiting.");
+
+    STARTUPINFOA si = { sizeof(si) };
+    PROCESS_INFORMATION pi = { 0 };
+    std::string dir = GetExeDirectory();
+    std::string cmd = "\"" + launcher + "\"";
+    std::vector<char> cmdbuf(cmd.begin(), cmd.end());
+    cmdbuf.push_back(0);
+    if (CreateProcessA(launcher.c_str(), cmdbuf.data(), NULL, NULL, FALSE,
+                       0, NULL, dir.c_str(), &si, &pi))
+    {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    ExitProcess(0);   // close the game; the launcher is now up
+}
+
+// ------------------------------------------------------------
 // Direct3D exports
 // The d3d9.def file controls export names.
 // ------------------------------------------------------------
 
 extern "C" void* WINAPI Direct3DCreate9(UINT SDKVersion)
 {
+    EnforceLauncherOnce();   // may relaunch the launcher and exit before anything else runs
 #ifdef MCTDE_LINK_SINGLE_DLL
-    // MorePhantoms gate: runs synchronously on the GAME'S MAIN THREAD at its first D3D
+    // PhantomUnleashed gate: runs synchronously on the GAME'S MAIN THREAD at its first D3D
     // touch -- before device creation and any multiplayer/session init. Shows the opt-in
     // prompt and applies the phantom-cap patches + pool segregation while the game is still
     // blocked here, so they are guaranteed to be in place before the game opens. Idempotent.
-    MorePhantoms_Start();
+    PhantomUnleashed_Start();
 #endif
 
     LoadCompatibilityDllsOnce();
@@ -644,10 +690,11 @@ extern "C" void* WINAPI Direct3DCreate9(UINT SDKVersion)
 
 extern "C" HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, void** ppD3D)
 {
+    EnforceLauncherOnce();
 #ifdef MCTDE_LINK_SINGLE_DLL
-    // See Direct3DCreate9 above: gate MorePhantoms on the game's main thread before it
+    // See Direct3DCreate9 above: gate PhantomUnleashed on the game's main thread before it
     // proceeds. Idempotent -- whichever Create entry the game uses, this runs exactly once.
-    MorePhantoms_Start();
+    PhantomUnleashed_Start();
 #endif
 
     LoadCompatibilityDllsOnce();

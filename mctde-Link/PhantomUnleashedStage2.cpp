@@ -1,5 +1,5 @@
 /*
-    MorePhantomsStage2  -  mctde-Link (built into d3d9.dll)
+    PhantomUnleashedStage2  -  mctde-Link (built into d3d9.dll)
 
     Stage 2 of the phantom-cap raise: the part that makes a >4 session actually stable.
 
@@ -34,7 +34,7 @@
 #include <string>
 #include <cstdio>
 
-#include "MorePhantomsStage2.h"
+#include "PhantomUnleashedStage2.h"
 #include "PatchEngine.h"   // mp::Log, mp::ThreadFreezer
 
 namespace mp {
@@ -571,7 +571,7 @@ static DWORD WINAPI AobThread(LPVOID param)
 // Public entry points
 // ---------------------------------------------------------------------------
 
-void MorePhantomsStage2_Install(uint8_t N)
+void PhantomUnleashedStage2_Install(uint8_t N)
 {
     EnsureLock();
     if (g_installed) { mp::Log("Stage2: already installed."); return; }
@@ -643,7 +643,7 @@ void MorePhantomsStage2_Install(uint8_t N)
     if (!g_aobThread) mp::Log("Stage2: failed to start AoB worker thread.");
 }
 
-void MorePhantomsStage2_Restore()
+void PhantomUnleashedStage2_Restore()
 {
     if (!g_savedLockReady) return;
 

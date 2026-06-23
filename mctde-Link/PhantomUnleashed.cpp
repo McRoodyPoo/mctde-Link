@@ -1,17 +1,17 @@
 /*
-    MorePhantoms  -  mctde-Link (built into d3d9.dll)
+    PhantomUnleashed  -  mctde-Link (built into d3d9.dll)
 
-    Host glue for the MorePhantoms patch modules: reads the [MorePhantoms] ini
+    Host glue for the PhantomUnleashed patch modules: reads the [PhantomUnleashed] ini
     section, shows the launch-time Yes/No opt-in prompt, drives Prepare/Verify/
     Apply, routes diagnostics into mctde-Link's log, and reverts every patch on
     teardown.
 
-    The phantom-cap offset facts live in MorePhantomsStage1.cpp / MorePhantomsStage2.cpp,
+    The phantom-cap offset facts live in PhantomUnleashedStage1.cpp / PhantomUnleashedStage2.cpp,
     derived from Metal-Crow's reverse engineering (MultiPhantom / Dark Souls Overhaul).
     This is a rewrite for mctde-Link's patch engine, with attribution; no source text is
     intentionally copied.
 
-    SAFE DEFAULT: [MorePhantoms] VerifyOnly=1. Until that is flipped to 0, the engine
+    SAFE DEFAULT: [PhantomUnleashed] VerifyOnly=1. Until that is flipped to 0, the engine
     only logs a VERIFY report and never writes -- so a wrong offset can never corrupt
     the running game. Keep it at 1 until the log shows 0 mismatches AND Stage 2
     (offset-shift trampolines) is in place; Stage 1 alone is not a stable >4 session.
@@ -22,10 +22,10 @@
 #include <cstdlib>
 #include <cctype>
 
-#include "MorePhantoms.h"
+#include "PhantomUnleashed.h"
 #include "PatchEngine.h"
-#include "MorePhantomsStage1.h"
-#include "MorePhantomsStage2.h"
+#include "PhantomUnleashedStage1.h"
+#include "PhantomUnleashedStage2.h"
 
 // mctde-Link's shared logger (writes to the overlay log when [Settings] EnableLogging=1).
 extern "C" void McTDE_NetOverlay_Log(const char* text);
@@ -33,9 +33,9 @@ extern "C" void McTDE_NetOverlay_Log(const char* text);
 namespace {
 
 bool g_promptResolved = false;   // Mode / prompt has been evaluated this session
-bool g_userEnabled    = false;   // result: should MorePhantoms patch this run?
+bool g_userEnabled    = false;   // result: should PhantomUnleashed patch this run?
 bool g_applied        = false;   // Stage 1 patches actually committed
-bool g_startDone      = false;   // MorePhantoms_Start() has already run (idempotent)
+bool g_startDone      = false;   // PhantomUnleashed_Start() has already run (idempotent)
 int  g_activeCount    = 4;       // live session slot count: 4 (stock) until patches commit
 
 // ---- paths -----------------------------------------------------------------
@@ -57,15 +57,15 @@ std::string ModuleDir() {
 }
 
 std::string IniPath() { return ModuleDir() + "mctde-link.ini"; }
-std::string LogPath() { return ModuleDir() + "MorePhantoms.log"; }
+std::string LogPath() { return ModuleDir() + "PhantomUnleashed.log"; }
 
 // ---- log sink --------------------------------------------------------------
 // We gate very early (at Direct3DCreate9, before the host's logging is configured),
-// so MorePhantoms keeps its OWN log file -- the VERIFY report is captured regardless
+// so PhantomUnleashed keeps its OWN log file -- the VERIFY report is captured regardless
 // of host init order or [Settings] EnableLogging. We also forward to the host log
 // (when enabled) and the debugger.
 void LogSink(const std::string& msg) {
-    const std::string line = "[MorePhantoms] " + msg;
+    const std::string line = "[PhantomUnleashed] " + msg;
 
     static const std::string path = LogPath();
     HANDLE f = CreateFileA(path.c_str(), FILE_APPEND_DATA, FILE_SHARE_READ,
@@ -94,7 +94,7 @@ enum class Mode { Ask, On, Off };
 
 Mode ReadMode(const std::string& ini) {
     char buf[16] = { 0 };
-    GetPrivateProfileStringA("MorePhantoms", "Mode", "Ask", buf, sizeof(buf), ini.c_str());
+    GetPrivateProfileStringA("PhantomUnleashed", "Mode", "Ask", buf, sizeof(buf), ini.c_str());
     if (_stricmp(buf, "On")  == 0) return Mode::On;
     if (_stricmp(buf, "Off") == 0) return Mode::Off;
     return Mode::Ask;
@@ -125,7 +125,7 @@ bool RunningUnderWine() {
 
 } // namespace
 
-void MorePhantoms_Prompt() {
+void PhantomUnleashed_Prompt() {
     if (g_promptResolved) return;
     EnsureLogSink();
 
@@ -135,13 +135,13 @@ void MorePhantoms_Prompt() {
     if (mode == Mode::Off) {
         g_userEnabled = false;
         g_promptResolved = true;
-        mp::Log("Mode=Off; MorePhantoms disabled (vanilla matchmaking).");
+        mp::Log("Mode=Off; PhantomUnleashed disabled (vanilla matchmaking).");
         return;
     }
     if (mode == Mode::On) {
         g_userEnabled = true;
         g_promptResolved = true;
-        mp::Log("Mode=On; MorePhantoms enabled without prompt.");
+        mp::Log("Mode=On; PhantomUnleashed enabled without prompt.");
         return;
     }
 
@@ -151,48 +151,48 @@ void MorePhantoms_Prompt() {
     if (RunningUnderWine()) {
         g_userEnabled = false;
         g_promptResolved = true;
-        mp::Log("Proton/Wine detected: the Ask prompt is unsupported here, so MorePhantoms is "
-                "OFF. Set [MorePhantoms] Mode=On (or Off) in mctde-link.ini to choose explicitly.");
+        mp::Log("Proton/Wine detected: the Ask prompt is unsupported here, so PhantomUnleashed is "
+                "OFF. Set [PhantomUnleashed] Mode=On (or Off) in mctde-link.ini to choose explicitly.");
         return;
     }
 
     // Mode == Ask: modal opt-in before the overlay/net modules initialize.
     // No is the DEFAULT button (MB_DEFBUTTON2): the normal way to play is with
-    // MorePhantoms DISABLED -- enabling it is a deliberate, special-occasion choice that
+    // PhantomUnleashed DISABLED -- enabling it is a deliberate, special-occasion choice that
     // segregates you into a separate (and, until Stage 2, less stable) pool.
     const int answer = MessageBoxA(
         NULL,
-        "Enable MorePhantoms?\r\n\r\n"
+        "Enable PhantomUnleashed?\r\n\r\n"
         "This raises the co-op / invasion phantom cap above the stock 4.\r\n\r\n"
         "While enabled you will ONLY be able to connect with other players who also "
-        "have MorePhantoms enabled (a separate matchmaking pool).\r\n\r\n"
+        "have PhantomUnleashed enabled (a separate matchmaking pool).\r\n\r\n"
         "Most of the time you should choose NO and play normally with everyone. Only "
-        "choose Yes for a planned MorePhantoms session with others who also have it on.",
-        "mctde-Link - MorePhantoms",
+        "choose Yes for a planned PhantomUnleashed session with others who also have it on.",
+        "mctde-Link - PhantomUnleashed",
         MB_YESNO | MB_ICONQUESTION | MB_TOPMOST | MB_SETFOREGROUND | MB_DEFBUTTON2);
 
     g_userEnabled = (answer == IDYES);
     g_promptResolved = true;
-    mp::Log(g_userEnabled ? "Prompt: player chose YES (MorePhantoms enabled)."
+    mp::Log(g_userEnabled ? "Prompt: player chose YES (PhantomUnleashed enabled)."
                           : "Prompt: player chose NO (vanilla matchmaking).");
 }
 
-void MorePhantoms_Start() {
+void PhantomUnleashed_Start() {
     EnsureLogSink();
     if (g_startDone) return;                       // idempotent: gate runs exactly once
     g_startDone = true;
-    if (!g_promptResolved) MorePhantoms_Prompt();  // safety: never start un-gated
+    if (!g_promptResolved) PhantomUnleashed_Prompt();  // safety: never start un-gated
 
     const std::string ini = IniPath();
-    const int maxPhantoms = GetPrivateProfileIntA("MorePhantoms", "MaxPhantoms", 18, ini.c_str());
-    const int verifyOnly  = GetPrivateProfileIntA("MorePhantoms", "VerifyOnly",  1, ini.c_str());
+    const int maxPhantoms = GetPrivateProfileIntA("PhantomUnleashed", "MaxPhantoms", 18, ini.c_str());
+    const int verifyOnly  = GetPrivateProfileIntA("PhantomUnleashed", "VerifyOnly",  1, ini.c_str());
 
     // NetworkVersion (the matchmaking pool key) is read as a string so both decimal ("77")
     // and hex ("0x4D") are accepted. Default 0x4D. Vanilla retail is 0x2E.
     int netVer = 0x4D;
     {
         char raw[16] = { 0 };
-        GetPrivateProfileStringA("MorePhantoms", "NetworkVersion", "0x4D", raw, sizeof(raw), ini.c_str());
+        GetPrivateProfileStringA("PhantomUnleashed", "NetworkVersion", "0x4D", raw, sizeof(raw), ini.c_str());
         const long v = strtol(raw, nullptr, 0); // base 0 -> auto-detect 0x.. or decimal
         if (v >= 0 && v <= 0xFF) netVer = (int)v;
     }
@@ -200,14 +200,14 @@ void MorePhantoms_Start() {
     // Game internal memory pool, in MB. 0 leaves it stock (~10 MB). Clamp to 255 MB so the
     // byte value stays under the engine's safe max (0x0FFFFFFF). Stage 1 only patches it
     // when the requested size exceeds the stock pool.
-    int poolMB = GetPrivateProfileIntA("MorePhantoms", "MemoryPoolMB", 192, ini.c_str());
+    int poolMB = GetPrivateProfileIntA("PhantomUnleashed", "MemoryPoolMB", 192, ini.c_str());
     if (poolMB < 0)   poolMB = 0;
     if (poolMB > 255) poolMB = 255;
     const uint32_t poolBytes = (uint32_t)poolMB << 20;
 
     mp::Log("----------------------------------------");
     char verHex[8]; sprintf_s(verHex, sizeof(verHex), "0x%02X", netVer);
-    mp::Log("MorePhantoms_Start: enabled=" + std::to_string(g_userEnabled ? 1 : 0)
+    mp::Log("PhantomUnleashed_Start: enabled=" + std::to_string(g_userEnabled ? 1 : 0)
             + " MaxPhantoms=" + std::to_string(maxPhantoms)
             + " NetworkVersion=" + verHex
             + " MemoryPoolMB=" + std::to_string(poolMB)
@@ -218,21 +218,21 @@ void MorePhantoms_Start() {
         return;
     }
 
-    mp::MorePhantomsConfig cfg;
+    mp::PhantomUnleashedConfig cfg;
     cfg.maxPhantoms     = (uint8_t)maxPhantoms;
     cfg.networkVersion  = (uint8_t)netVer;
     cfg.memoryPoolBytes = poolBytes;
 
-    if (!mp::MorePhantomsStage1_Prepare(cfg)) {
+    if (!mp::PhantomUnleashedStage1_Prepare(cfg)) {
         mp::Log("Prepare failed; aborting (no changes made).");
         return;
     }
 
-    const int mismatches = mp::MorePhantomsStage1_Verify();
+    const int mismatches = mp::PhantomUnleashedStage1_Verify();
 
     if (verifyOnly) {
         mp::Log("VerifyOnly mode: leaving the game untouched. "
-                "Set [MorePhantoms] VerifyOnly=0 once the report above shows 0 mismatches.");
+                "Set [PhantomUnleashed] VerifyOnly=0 once the report above shows 0 mismatches.");
         return;
     }
 
@@ -240,8 +240,8 @@ void MorePhantoms_Start() {
     // and applying on top of it double-patches the game -> crash.
     if (PhantomBreakPresent(ini)) {
         mp::Log("Phantom_Break detected (loaded module or [DLLs] chainload entry). Refusing "
-                "to apply MorePhantoms -- running both double-patches the game and crashes. "
-                "Disable Phantom_Break to use MorePhantoms.");
+                "to apply PhantomUnleashed -- running both double-patches the game and crashes. "
+                "Disable Phantom_Break to use PhantomUnleashed.");
         return;
     }
 
@@ -251,27 +251,27 @@ void MorePhantoms_Start() {
         return;
     }
 
-    if (mp::MorePhantomsStage1_Apply()) {
+    if (mp::PhantomUnleashedStage1_Apply()) {
         g_applied = true;
         g_activeCount = maxPhantoms;   // overlay now reads this many phantom slots
         mp::Log("Stage 1 static patches applied.");
         // Stage 2: offset-shift trampolines + caves + deferred AoB (makes >4 stable).
         // Calibrated for N=18; installs only at that count, else logs + skips.
-        mp::MorePhantomsStage2_Install((uint8_t)maxPhantoms);
+        mp::PhantomUnleashedStage2_Install((uint8_t)maxPhantoms);
     } else {
         mp::Log("Apply failed; engine rolled back.");
     }
 }
 
-void MorePhantoms_Restore() {
+void PhantomUnleashed_Restore() {
     // Idempotent: safe to call from OnProcessDetach and the watchdog teardown path.
     // Unwind Stage 2 (installed last) before Stage 1.
-    mp::MorePhantomsStage2_Restore();
-    mp::MorePhantomsStage1_Restore();
+    mp::PhantomUnleashedStage2_Restore();
+    mp::PhantomUnleashedStage1_Restore();
     g_applied = false;
     g_activeCount = 4; // back to stock layout
 }
 
-int MorePhantoms_ActivePhantomCount() {
+int PhantomUnleashed_ActivePhantomCount() {
     return g_activeCount;
 }

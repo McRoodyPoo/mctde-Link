@@ -9,7 +9,7 @@
 #include <windows.h>
 #include <d3d9.h>
 #include "D3DOverlay.h"
-#include "MorePhantoms.h"
+#include "PhantomUnleashed.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -67,7 +67,7 @@ static bool g_triedWorldChrBaseScan = false;
 static const uintptr_t OFF_WORLDCHR_SELF = 0x3C;
 static const uintptr_t OFF_CHR_MP_ROOT = 0x0C;
 // Remote phantom character pointers are a contiguous array off the MP root: slot k
-// lives at mpRoot + 0x20*k (stock PTDE exposes slots 1..3). MorePhantoms resizes this
+// lives at mpRoot + 0x20*k (stock PTDE exposes slots 1..3). PhantomUnleashed resizes this
 // array, so the overlay reads as many slots as are currently live.
 static const uintptr_t OFF_MPCHR_FIRST   = 0x20; // slot 1
 static const uintptr_t OFF_MPCHR_STRIDE  = 0x20; // bytes per slot
@@ -1546,10 +1546,10 @@ static std::vector<WorldActorRow> ReadWorldActors()
         SafeRead(selfChr + OFF_CHR_MP_ROOT, mpRoot);
 
     // Read one row per remote phantom slot. Stock PTDE has 3 (self + 3 = 4); when
-    // MorePhantoms is active the slot array is larger, so iterate up to the live count.
+    // PhantomUnleashed is active the slot array is larger, so iterate up to the live count.
     // Slots whose pointer is null/garbage become invalid rows and are filtered downstream,
     // so an over-read can never crash (SafeRead is fault-guarded, LooksLikePointer screens).
-    int total = MorePhantoms_ActivePhantomCount(); // self + (total - 1) remotes
+    int total = PhantomUnleashed_ActivePhantomCount(); // self + (total - 1) remotes
     if (total < 4) total = 4;
     if (total > MAX_TRACKED_PLAYER_NO) total = MAX_TRACKED_PLAYER_NO;
 
@@ -6807,7 +6807,7 @@ static DWORD WINAPI WatchdogThread(LPVOID)
         {
             WriteLogLine("Watchdog: game window gone; forcing process exit to avoid a zombie process.");
             g_running = false;
-            MorePhantoms_Restore(); // revert any applied phantom-cap patches before we exit
+            PhantomUnleashed_Restore(); // revert any applied phantom-cap patches before we exit
             ExitProcess(0);
         }
     }
@@ -6904,7 +6904,7 @@ extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule)
 extern "C" void McTDE_NetOverlay_OnProcessDetach()
 {
     g_running = false;
-    MorePhantoms_Restore(); // revert phantom-cap patches so a half-patched image never outlives us
+    PhantomUnleashed_Restore(); // revert phantom-cap patches so a half-patched image never outlives us
     DisableTruePingTimerPeriod();
     StopWebSocketServer();
     D3DOverlay_Shutdown();

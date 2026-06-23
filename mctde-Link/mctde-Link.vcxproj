@@ -87,10 +87,10 @@
     <ClInclude Include="framework.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="D3DOverlay.h" />
-    <ClInclude Include="MorePhantoms.h" />
+    <ClInclude Include="PhantomUnleashed.h" />
     <ClInclude Include="PatchEngine.h" />
-    <ClInclude Include="MorePhantomsStage1.h" />
-    <ClInclude Include="MorePhantomsStage2.h" />
+    <ClInclude Include="PhantomUnleashedStage1.h" />
+    <ClInclude Include="PhantomUnleashedStage2.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
@@ -98,10 +98,10 @@
     <ClCompile Include="VersionChecker.cpp" />
     <ClCompile Include="pch.cpp" />
     <ClCompile Include="D3DOverlay.cpp" />
-    <ClCompile Include="MorePhantoms.cpp" />
+    <ClCompile Include="PhantomUnleashed.cpp" />
     <ClCompile Include="PatchEngine.cpp" />
-    <ClCompile Include="MorePhantomsStage1.cpp" />
-    <ClCompile Include="MorePhantomsStage2.cpp" />
+    <ClCompile Include="PhantomUnleashedStage1.cpp" />
+    <ClCompile Include="PhantomUnleashedStage2.cpp" />
   </ItemGroup>
   <ItemGroup>
     <Text Include="d3d9.def" />

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.4.1 - GooeyInterface
+
+- Renamed the in-game phantom-cap feature from MorePhantoms to PhantomUnleashed (config section is now `[PhantomUnleashed]`).
+- Existing `[MorePhantoms]` settings are no longer read; re-enable the feature through the launcher or rename the section to `[PhantomUnleashed]`.
+- mctde-Link now runs through the mctde launcher: starting the game directly reopens the launcher instead.
+- If the launcher is missing, mctde-Link offers to download and install it from GitHub over HTTPS, verified by hash, only with your consent.
+- Added `[Launcher] RequireLauncher` (default on) to turn the launcher requirement off.
+
 ## v0.3.0 - PhantomUnleashed
 
 - Raises the co-op/invasion phantom cap from 4 to 18.

@@ -59,7 +59,7 @@ By default, that folder should live next to `d3d9.dll` in the PTDE `DATA` folder
 
 ## Phantom Break Compatibility
 
-`mctde-Link` now ships its own built-in phantom-cap raiser, **PhantomUnleashed** (see below), so you no longer need Phantom Break to play larger-than-four sessions — use the built-in feature instead.
+`mctde-Link` now ships its own built-in phantom-cap raiser, **PhantomUnleashed** (see below), so you no longer need Phantom Break to play larger-than-four sessions. Use the built-in feature instead.
 
 **Do not run Phantom Break alongside PhantomUnleashed.** Both patch the same phantom-cap offsets; running them together double-patches the game and crashes. PhantomUnleashed detects a loaded or chainloaded `Phantom_Break.dll` and refuses to apply.
 

@@ -59,36 +59,18 @@ By default, that folder should live next to `d3d9.dll` in the PTDE `DATA` folder
 
 ## Phantom Break Compatibility
 
-Phantom Break can be loaded alongside `mctde-Link` through an explicit `GenericDLL` entry in `mctde-link.ini`, but the overlay is not fully compatible with Phantom Break yet.
+`mctde-Link` now ships its own built-in phantom-cap raiser, **PhantomUnleashed** (see below), so you no longer need Phantom Break to play larger-than-four sessions — use the built-in feature instead.
 
-Current limitation: the overlay roster is still built around the normal four-player PTDE world layout. A fifth Phantom Break player will not populate into a new fifth row, and if one of the four rostered players leaves, the fifth player will not automatically move into the open overlay slot.
+**Do not run Phantom Break alongside PhantomUnleashed.** Both patch the same phantom-cap offsets; running them together double-patches the game and crashes. PhantomUnleashed detects a loaded or chainloaded `Phantom_Break.dll` and refuses to apply.
 
-To enable Phantom Break with `mctde-Link`:
-
-1. Keep `d3d9.dll` and `mctde-link.ini` in the PTDE `DATA` folder.
-2. Put Phantom Break's DLL in the PTDE `DATA` folder, or keep it elsewhere and use its full path.
-3. Add it to an open slot under `[DLLs]`:
+If you specifically want to use Phantom Break instead of PhantomUnleashed, leave PhantomUnleashed off (`[PhantomUnleashed] Mode=Off`) and load `Phantom_Break.dll` through a `GenericDLL` entry like any other chainloaded DLL:
 
 ```ini
 [DLLs]
 GenericDLL0=Phantom_Break.dll
 ```
 
-If the DLL is not in the PTDE `DATA` folder, use the full path instead:
-
-```ini
-[DLLs]
-GenericDLL0=C:\Path\To\Phantom_Break.dll
-```
-
-Use the first empty `GenericDLL` slot if `GenericDLL0` is already used. If your copy has a different filename, use that exact filename in the `GenericDLL` entry.
-
-To disable Phantom Break, blank its `GenericDLL` entry in `mctde-link.ini`:
-
-```ini
-[DLLs]
-GenericDLL0=
-```
+Use the first empty `GenericDLL` slot, or the DLL's full path if it isn't in the PTDE `DATA` folder; blank the entry to disable it. Either way, the overlay roster is still built around the four-player PTDE layout, so a fifth player won't populate a new row.
 
 ## PhantomUnleashed (built-in phantom-cap raise)
 
@@ -241,7 +223,7 @@ This project/library was built with reference to community Dark Souls: Prepare t
 
 ## Special Thanks
 
-Special thanks to **Ashley**, **MetalCrow**, **Sean Pesce** **Eloise**, **Dasmins**, **Alax**, JKAnderson, Wulf2k, Chronial, Peter “Durante” Thoman, Grimrukh, and the broader Dark Souls modding and reverse-engineering community.
+Special thanks to **Ashley**, **[MetalCrow](https://github.com/metal-crow)**, **[Sean Pesce](https://github.com/SeanPesce)**, **Eloise**, **Dasmins**, **Alax**, **[JKAnderson](https://github.com/JKAnderson)**, **[Wulf2k](https://github.com/Wulf2k)**, **[Chronial](https://github.com/Chronial)**, **[Peter “Durante” Thoman](https://github.com/PeterTh)**, **[Grimrukh](https://github.com/Grimrukh)**, and the broader Dark Souls modding and reverse-engineering community.
 
 Original game by **FromSoftware** and **Bandai Namco**.
 ```

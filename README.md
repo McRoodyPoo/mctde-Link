@@ -75,8 +75,8 @@ Output is `Release/d3d9.dll`. A release package is just `d3d9.dll`, `mctde-link.
 
 ## Credits
 
-Built with reference to the PTDE modding and reverse-engineering community, including [DS Gadget](https://github.com/JKAnderson/DS-Gadget), [PTDE Practice Tool](https://github.com/veeenu/ptde_practice_tool), [DaS-PC-MPChan](https://github.com/metal-crow/DaS-PC-MPChan), [dscm-server](https://github.com/Chronial/dscm-server), [DSFix](https://github.com/PeterTh/dsfix), [Dark-Souls-1-Overhaul](https://github.com/metal-crow/Dark-Souls-1-Overhaul), Cheat Engine, and Ghidra.
+Built with reference to the PTDE modding and reverse-engineering community, including [DS Gadget](https://github.com/JKAnderson/DS-Gadget), [PTDE Practice Tool](https://github.com/helloeloise/ptde_practice_tool), [DaS-PC-MPChan](https://github.com/metal-crow/DaS-PC-MPChan), [dscm-server](https://github.com/Chronial/dscm-server), [DSFix](https://github.com/PeterTh/dsfix), [Dark-Souls-1-Overhaul](https://github.com/metal-crow/Dark-Souls-1-Overhaul), Cheat Engine, and Ghidra.
 
-Special thanks to **Ashley**, **[MetalCrow](https://github.com/metal-crow)**, **[Sean Pesce](https://github.com/SeanPesce)**, **Eloise**, **Dasmins**, **Alax**, **[JKAnderson](https://github.com/JKAnderson)**, **[Wulf2k](https://github.com/Wulf2k)**, **[Chronial](https://github.com/Chronial)**, **[Peter "Durante" Thoman](https://github.com/PeterTh)**, **[Grimrukh](https://github.com/Grimrukh)**, and the broader Dark Souls modding community.
+Special thanks to **Ashley**, **[MetalCrow](https://github.com/metal-crow)**, **[Sean Pesce](https://github.com/SeanPesce)**, **[Eloise](https://github.com/helloeloise)**, **Dasmins**, **Alax**, **[JKAnderson](https://github.com/JKAnderson)**, **[Wulf2k](https://github.com/Wulf2k)**, **[Chronial](https://github.com/Chronial)**, **[Peter "Durante" Thoman](https://github.com/PeterTh)**, **[Grimrukh](https://github.com/Grimrukh)**, and the broader Dark Souls modding community.
 
 Original game by **FromSoftware** and **Bandai Namco**.

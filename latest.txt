@@ -1,3 +1,3 @@
 mctde=0.88
 mctde-link=0.4.1
-mctde-launcher=0.1.0
+mctde-launcher=0.2.0

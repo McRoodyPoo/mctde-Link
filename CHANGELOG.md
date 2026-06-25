@@ -1,8 +1,15 @@
 # Changelog
 
+## v0.4.5 - Clean Exit
+
+- When the game is started without the launcher (Steam-direct launch or a folder double-click), the mod still closes the game and reopens the launcher — but now spawns the launcher outside Steam's kill-on-close job. Previously the reopened launcher stayed in Steam's process tree, so Steam kept counting the game as running even after it closed; now Steam registers the close.
+
 ## v0.4.4 - Homecoming
 
-- After an auto-update, mctde-Link now reopens the launcher instead of the game. The update helper was relaunching the game with the launcher's environment flag still set, so the launcher guard let it run directly; it now relaunches `mctde_launcher.exe` when present (honoring `[Launcher] RequireLauncher=0`). Takes effect for updates made from 0.4.4 onward.
+- Fixed the launcher not reopening after a mod auto-update.
+- The update helper now relaunches `mctde_launcher.exe` when present (unless `[Launcher] RequireLauncher` is 0), instead of letting the updated game run directly.
+
+> Note: applies to updates started from 0.4.4 onward; the 0.4.x → 0.4.4 update itself still uses the old helper.
 
 ## v0.4.3 - Reversal
 

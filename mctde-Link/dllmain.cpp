@@ -607,12 +607,41 @@ DWORD WINAPI HubThread(LPVOID)
 
 // ------------------------------------------------------------
 // Launcher guard
-// mctde_launcher.exe sets MCTDE_VIA_LAUNCHER=1 on the game process it spawns. If the game
-// was started WITHOUT the launcher (env var absent), relaunch the launcher and exit, so
-// players always go through it (and DSFix/PhantomUnleashed toggles get applied). Safety:
-// only enforced when mctde_launcher.exe is actually present beside the game, and can be
+// mctde_launcher.exe sets MCTDE_VIA_LAUNCHER=1 on the game process it spawns. If the game was
+// started WITHOUT the launcher (env var absent) -- whether by Steam launching DARKSOULS.exe
+// directly or a folder double-click -- close the game and reopen the launcher, so play always
+// goes through it. Only enforced when mctde_launcher.exe is present beside the game, and can be
 // turned off with [Launcher] RequireLauncher=0 in mctde-link.ini.
+//
+// The reopened launcher is started "clean" so it isn't tied to Steam's PTDE session:
+//   * CREATE_BREAKAWAY_FROM_JOB pulls it out of Steam's kill-on-close job (Steam launches the
+//     game inside one); otherwise Steam keeps counting the app as running after we close it.
+//   * We strip the inherited Steam* env vars (SteamClientLaunch / SteamAppId / SteamGameId /
+//     ...). Steam treats a child carrying those as a continuation of the PTDE session, which is
+//     why a hand-opened launcher shows Spacewar but a mod-reopened one stayed on PTDE. With them
+//     gone, the reopened launcher behaves like a hand-opened one and Steam drops PTDE.
 // ------------------------------------------------------------
+
+// Remove every Steam* variable from THIS process's environment. Safe because the caller
+// ExitProcess()es right after spawning the launcher, which inherits this cleaned environment.
+static void StripSteamEnvFromCurrentProcess()
+{
+    LPWCH block = GetEnvironmentStringsW();
+    if (!block) return;
+    std::vector<std::wstring> names;
+    for (LPWCH p = block; *p; )
+    {
+        std::wstring entry(p);
+        p += entry.size() + 1;
+        size_t eq = entry.find(L'=');
+        if (eq == std::wstring::npos || eq == 0) continue;   // skip drive entries like "=C:"
+        if (_wcsnicmp(entry.c_str(), L"Steam", 5) == 0)
+            names.push_back(entry.substr(0, eq));
+    }
+    FreeEnvironmentStringsW(block);
+    for (const std::wstring& n : names)
+        SetEnvironmentVariableW(n.c_str(), NULL);
+}
 
 void EnforceLauncherOnce()
 {
@@ -633,16 +662,28 @@ void EnforceLauncherOnce()
     if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
         return;   // no launcher present -- don't strand the player with no way back in
 
-    WriteHubLog("Game started without the launcher; reopening mctde_launcher.exe and exiting.");
+    WriteHubLog("Game started without the launcher; reopening mctde_launcher.exe (clean) and exiting.");
+
+    // Strip Steam's session env so the reopened launcher isn't seen as part of the PTDE session.
+    StripSteamEnvFromCurrentProcess();
 
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
     std::string dir = GetExeDirectory();
     std::string cmd = "\"" + launcher + "\"";
-    std::vector<char> cmdbuf(cmd.begin(), cmd.end());
-    cmdbuf.push_back(0);
-    if (CreateProcessA(launcher.c_str(), cmdbuf.data(), NULL, NULL, FALSE,
-                       0, NULL, dir.c_str(), &si, &pi))
+
+    // Try to break the launcher out of Steam's kill-on-close job; fall back to a plain launch
+    // if breakaway is refused (no job, or the job forbids it).
+    std::vector<char> cb(cmd.begin(), cmd.end()); cb.push_back(0);
+    BOOL launched = CreateProcessA(launcher.c_str(), cb.data(), NULL, NULL, FALSE,
+                                   CREATE_BREAKAWAY_FROM_JOB, NULL, dir.c_str(), &si, &pi);
+    if (!launched)
+    {
+        std::vector<char> cb2(cmd.begin(), cmd.end()); cb2.push_back(0);
+        launched = CreateProcessA(launcher.c_str(), cb2.data(), NULL, NULL, FALSE,
+                                  0, NULL, dir.c_str(), &si, &pi);
+    }
+    if (launched)
     {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);

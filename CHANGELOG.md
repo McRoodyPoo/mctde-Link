@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.4.2 - HomewardBone
+
+- When Steam launches the game directly, mctde-Link now closes that instance and relaunches the game from its folder, so the modded path is always used — no second click. A plain double-click of the exe in the folder is left alone.
+- `[Launcher] RequireLauncher` now gates this Steam redirect (still default on); set it to 0 to let Steam launch the game directly.
+
 ## v0.4.1 - GooeyInterface
 
 - Renamed the in-game phantom-cap feature from MorePhantoms to PhantomUnleashed (config section is now `[PhantomUnleashed]`).

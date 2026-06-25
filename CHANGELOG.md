@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.4.4 - Homecoming
+
+- After an auto-update, mctde-Link now reopens the launcher instead of the game. The update helper was relaunching the game with the launcher's environment flag still set, so the launcher guard let it run directly; it now relaunches `mctde_launcher.exe` when present (honoring `[Launcher] RequireLauncher=0`). Takes effect for updates made from 0.4.4 onward.
+
 ## v0.4.3 - Reversal
 
 - Reverted the 0.4.2 launcher-guard change. Restored the original behavior: starting the game without the launcher (folder/direct launch) reopens mctde_launcher.exe, exactly as in 0.4.1. 0.4.2's Steam-only scoping stopped the launcher from reopening on a folder launch; this undoes that.

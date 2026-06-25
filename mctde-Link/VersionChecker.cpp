@@ -19,7 +19,7 @@
 // Installed versions bundled with this release.
 // Change these every time you release a new version.
 #define CURRENT_MCTDE_VERSION "0.88"
-#define CURRENT_MCTDE_LINK_VERSION "0.4.3"
+#define CURRENT_MCTDE_LINK_VERSION "0.4.4"
 
 // Your GitHub raw file host.
 #define VERSION_HOST L"raw.githubusercontent.com"
@@ -752,7 +752,18 @@ static bool LaunchUpdater()
     // 4. Clean up and relaunch.
     script << "Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue\n";
     script << "Remove-Item -Force $zip -ErrorAction SilentlyContinue\n";
-    script << "if (Test-Path $exe) { try { Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe); L 'relaunched game.' } catch { L ('relaunch FAILED: ' + $_.Exception.Message) } } else { L 'game exe not found for relaunch.' }\n";
+    // Relaunch the LAUNCHER, not the game: this helper inherited the game's environment
+    // (MCTDE_VIA_LAUNCHER=1 when started via the launcher), and Start-Process would pass that
+    // flag to a relaunched game, making the launcher guard let it run directly instead of
+    // reopening the launcher. Mirror the guard: prefer mctde_launcher.exe when it's present and
+    // RequireLauncher isn't 0; otherwise fall back to relaunching the game exe.
+    script << "$launcher = Join-Path $install 'mctde_launcher.exe'\n";
+    script << "$ini = Join-Path $install 'mctde-link.ini'\n";
+    script << "$useLauncher = (Test-Path $launcher)\n";
+    script << "if ($useLauncher -and (Test-Path $ini) -and ((Get-Content -LiteralPath $ini -ErrorAction SilentlyContinue) -match '^\\s*RequireLauncher\\s*=\\s*0')) { $useLauncher = $false }\n";
+    script << "if ($useLauncher) { try { Start-Process -FilePath $launcher -WorkingDirectory $install; L 'relaunched launcher.' } catch { L ('launcher relaunch FAILED: ' + $_.Exception.Message) } }\n";
+    script << "elseif (Test-Path $exe) { try { Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe); L 'relaunched game.' } catch { L ('relaunch FAILED: ' + $_.Exception.Message) } }\n";
+    script << "else { L 'nothing found to relaunch.' }\n";
     script << "L 'helper done.'\n";
     script << "Remove-Item -Force $self -ErrorAction SilentlyContinue\n";
 

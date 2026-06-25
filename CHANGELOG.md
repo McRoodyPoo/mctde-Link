@@ -1,9 +1,8 @@
 # Changelog
 
-## v0.4.2 - HomewardBone
+## v0.4.3 - Reversal
 
-- When Steam launches the game directly, mctde-Link now closes that instance and relaunches the game from its folder, so the modded path is always used — no second click. A plain double-click of the exe in the folder is left alone.
-- `[Launcher] RequireLauncher` now gates this Steam redirect (still default on); set it to 0 to let Steam launch the game directly.
+- Reverted the 0.4.2 launcher-guard change. Restored the original behavior: starting the game without the launcher (folder/direct launch) reopens mctde_launcher.exe, exactly as in 0.4.1. 0.4.2's Steam-only scoping stopped the launcher from reopening on a folder launch; this undoes that.
 
 ## v0.4.1 - GooeyInterface
 

@@ -607,31 +607,12 @@ DWORD WINAPI HubThread(LPVOID)
 
 // ------------------------------------------------------------
 // Launcher guard
-// The game is meant to start through mctde_launcher.exe, which sets MCTDE_VIA_LAUNCHER=1 on
-// the process it spawns. If STEAM launches the game exe directly (our env var absent but
-// Steam's own launch env vars present), we close this Steam-spawned instance and immediately
-// relaunch the game from its folder with MCTDE_VIA_LAUNCHER=1 set -- so play always goes
-// through the modded folder path, with the launcher's last-saved DSFix/PhantomUnleashed
-// toggles still applied from their ini files. A plain double-click of the exe (no Steam env,
-// no launcher) is left alone. Can be turned off with [Launcher] RequireLauncher=0 in
-// mctde-link.ini.
+// mctde_launcher.exe sets MCTDE_VIA_LAUNCHER=1 on the game process it spawns. If the game
+// was started WITHOUT the launcher (env var absent), relaunch the launcher and exit, so
+// players always go through it (and DSFix/PhantomUnleashed toggles get applied). Safety:
+// only enforced when mctde_launcher.exe is actually present beside the game, and can be
+// turned off with [Launcher] RequireLauncher=0 in mctde-link.ini.
 // ------------------------------------------------------------
-
-// True when the Steam client started this process. Steam injects these vars into the
-// children it launches; a bare Explorer double-click of the exe has none of them.
-// SteamClientLaunch is the canonical "started from the Steam UI" marker; the AppId/GameId
-// fallbacks catch shortcut/compat launches that don't set it.
-static bool LaunchedViaSteam()
-{
-    static const char* kSteamVars[] = { "SteamClientLaunch", "SteamGameId", "SteamAppId" };
-    char buf[64] = { 0 };
-    for (const char* v : kSteamVars)
-    {
-        if (GetEnvironmentVariableA(v, buf, sizeof(buf)) > 0 && buf[0] != '\0')
-            return true;
-    }
-    return false;
-}
 
 void EnforceLauncherOnce()
 {
@@ -647,37 +628,26 @@ void EnforceLauncherOnce()
     if (GetPrivateProfileIntA("Launcher", "RequireLauncher", 1, iniPath.c_str()) == 0)
         return;   // feature disabled
 
-    // Only redirect when STEAM started the game directly. Anything else (a folder double-click)
-    // is left to run as-is rather than being closed out from under the player.
-    if (!LaunchedViaSteam())
-        return;
+    std::string launcher = ResolveGamePath("mctde_launcher.exe");
+    DWORD attr = GetFileAttributesA(launcher.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES || (attr & FILE_ATTRIBUTE_DIRECTORY))
+        return;   // no launcher present -- don't strand the player with no way back in
 
-    // Relaunch THIS exe (resolves DARKSOULS.exe vs DATA.exe automatically) from its own folder,
-    // tagged as launcher-spawned so the new instance skips this guard -- no relaunch loop.
-    char selfPath[MAX_PATH] = { 0 };
-    if (GetModuleFileNameA(NULL, selfPath, MAX_PATH) == 0)
-        return;   // can't resolve our own path -- let the Steam instance run rather than strand it
-
-    WriteHubLog("Game launched directly by Steam; relaunching it from the folder.");
-
-    SetEnvironmentVariableA("MCTDE_VIA_LAUNCHER", "1");   // inherited by the child spawned below
+    WriteHubLog("Game started without the launcher; reopening mctde_launcher.exe and exiting.");
 
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
     std::string dir = GetExeDirectory();
-    std::string cmd = "\"" + std::string(selfPath) + "\"";
+    std::string cmd = "\"" + launcher + "\"";
     std::vector<char> cmdbuf(cmd.begin(), cmd.end());
     cmdbuf.push_back(0);
-    if (CreateProcessA(selfPath, cmdbuf.data(), NULL, NULL, FALSE,
+    if (CreateProcessA(launcher.c_str(), cmdbuf.data(), NULL, NULL, FALSE,
                        0, NULL, dir.c_str(), &si, &pi))
     {
         CloseHandle(pi.hThread);
         CloseHandle(pi.hProcess);
-        ExitProcess(0);   // close this Steam-spawned instance; the folder-launched one is up
     }
-
-    // Relaunch failed: don't kill the running game -- let the Steam instance continue.
-    WriteHubLog("Folder relaunch failed; letting the Steam-launched instance continue.");
+    ExitProcess(0);   // close the game; the launcher is now up
 }
 
 // ------------------------------------------------------------

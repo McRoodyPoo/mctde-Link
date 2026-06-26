@@ -41,6 +41,16 @@ helper that waits for the game to exit, swaps the files, relaunches, and self-de
 3. **Build the release zip** named exactly **`mctde-Link.zip`**, containing at the root
    (or inside one top-level folder):
    - `d3d9.dll` (the new Release build)
+   - **`mctde_input.dll`** — a modern 32-bit Valve `steam_api.dll` renamed. Required by the
+     `[Controller] BindingNudge` feature (PTDE's own `steam_api.dll` is too old — `ISteamController`
+     v001 — to open the Steam controller binding panel). It must export the `SteamAPI_ISteamInput_*`
+     flat functions and be **32-bit (PE32)**. A validated copy lives at
+     `Z:\Dark Souls Mods\Dark-Souls-1-Overhaul-master\OverhaulDLL\lib\steam\lib\steam_api.dll`
+     (FileVersion 06.28.18.86, `SteamInput002`/`SteamClient020`); any current Steam game's 32-bit
+     `steam_api.dll` or the Steamworks SDK `redistributable_bin\steam_api.dll` also works.
+     **If you swap in a different build, update `[Controller] BindingNudgeInputVersion` /
+     `BindingNudgeClientVersion` to that SDK's interface versions** (the flat wrappers are version-coupled).
+     Freely redistributable. If omitted, the controller nudge simply no-ops (logged) — nothing else breaks.
    - optionally `mctde-link.ini` (won't overwrite an existing user ini) and any extras.
 4. **Create a GitHub release** (a full release, *not* a pre-release) and **attach
    `mctde-Link.zip`** as an asset. The tag name doesn't matter to the updater.
@@ -49,6 +59,26 @@ helper that waits for the game to exit, swaps the files, relaunches, and self-de
 
 > ⚠️ If a release is missing the `mctde-Link.zip` asset, auto-update gets a 404 and
 > falls back to opening the releases page (graceful, but no auto-install).
+
+### If the installer changed (mctde-Installer)
+
+The standalone installer (`../mctde-Installer`) self-updates the same way: on launch
+it reads `mctde-installer=` from `latest.txt` and, if a newer version exists, downloads
+the new exe, swaps itself out, and relaunches. To ship an installer update:
+
+1. **Bump `kInstallerVersion`** in `mctde-Installer/src/Update.cpp`.
+2. **Build it** (`mctde-Installer/build_gui.bat`). Output: `build/mctde-Installer.exe`.
+3. **Create a release in the `mctde-Installer` repo** (tagged `vX.Y.Z`) and **attach
+   `mctde-Installer.exe`** (exact name) — the self-update fetches it from
+   `github.com/McRoodyPoo/mctde-Installer/releases/latest/download/mctde-Installer.exe`.
+4. **Bump `mctde-installer=` in this repo's `latest.txt`** to match `kInstallerVersion`
+   (the installer reads its version from the central `latest.txt` here, but pulls the
+   binary from the mctde-Installer repo above).
+
+> ⚠️ If a release is missing the `mctde-Installer.exe` asset, the self-update download
+> fails its PE check and the installer just keeps running the current version (safe, but
+> no auto-update). Keep `kInstallerVersion` and the `latest.txt` line equal so users on
+> the newest build aren't re-prompted.
 
 ---
 

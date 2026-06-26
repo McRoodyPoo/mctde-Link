@@ -374,6 +374,12 @@ static bool g_showName = true;        // [Overlay] ShowName
 static bool g_showLocalMarker = true; // [Overlay] ShowLocalMarker
 static bool g_showDisconnected = true;// [Overlay] ShowDisconnected: keep a "Disconnected" row
                                       // for a player who leaves without dying, until replaced.
+// Spacewar controller-setup instruction panel. Shown by default ([Overlay]
+// ShowControllerSetup=1) until the user presses the hide bind (default Shift+F2),
+// which flips ShowControllerSetup to 0 in the INI so it stays hidden across launches.
+static bool g_showControllerSetup = true;
+static int g_controllerSetupHideKey = VK_F2;        // [Overlay] ControllerSetupHideKey (0x71)
+static int g_controllerSetupHideModifier = VK_SHIFT;// [Overlay] ControllerSetupHideModifier (0x10)
 // Master overlay visibility, toggled live by the hotkey. Not persisted to the INI.
 static volatile bool g_overlayVisible = true;
 // Virtual-key code for the master toggle. [Overlay] ToggleKey (default VK_F3 = 0x72).
@@ -1043,6 +1049,29 @@ static void LoadConfig(bool logIt)
     g_showHpField = GetPrivateProfileIntA("Overlay", "ShowHp", 1, g_iniPath) != 0;
     g_showLocalMarker = GetPrivateProfileIntA("Overlay", "ShowLocalMarker", 1, g_iniPath) != 0;
     g_showDisconnected = GetPrivateProfileIntA("Overlay", "ShowDisconnected", 1, g_iniPath) != 0;
+
+    // Spacewar controller-setup instructions. ShowControllerSetup defaults to 1; the
+    // hide bind (Shift+F2) writes a 0 here so the panel never returns once dismissed.
+    g_showControllerSetup = GetPrivateProfileIntA("Overlay", "ShowControllerSetup", 1, g_iniPath) != 0;
+    {
+        char setupKey[32];
+        ZeroMemory(setupKey, sizeof(setupKey));
+        GetPrivateProfileStringA("Overlay", "ControllerSetupHideKey", "0x71", setupKey, sizeof(setupKey), g_iniPath);
+        TrimString(setupKey);
+        int vk = (int)strtol(setupKey, NULL, 0);
+        if (vk <= 0 || vk > 255)
+            vk = VK_F2;
+        g_controllerSetupHideKey = vk;
+
+        char setupMod[32];
+        ZeroMemory(setupMod, sizeof(setupMod));
+        GetPrivateProfileStringA("Overlay", "ControllerSetupHideModifier", "0x10", setupMod, sizeof(setupMod), g_iniPath);
+        TrimString(setupMod);
+        int mod = (int)strtol(setupMod, NULL, 0);
+        if (mod < 0 || mod > 255)
+            mod = 0;
+        g_controllerSetupHideModifier = mod;
+    }
 
     // Master overlay toggle hotkey. Accepts decimal or hex (e.g. 119 or 0x77) virtual-key codes.
     {
@@ -5055,6 +5084,59 @@ static void DrawOverlayHp(HDC hdc, int x, int y, const OverlayRow& row, const ch
     DrawOverlayName(hdc, x, y, row, text);
 }
 
+// Spacewar controller-setup instruction panel. The first line is the gold heading;
+// the remaining lines are the white step-by-step body. Both backends share this.
+static const char* const kControllerSetupLines[] = {
+    "=[Spacewar Controller Setup]=",
+    "Press SHIFT + TAB",
+    "Click Controller Settings",
+    "Select your controller",
+    "Select Templates at the top",
+    "Select Gamepad in the list",
+    "Select Apply Configuration at the bottom right",
+    "Press SHIFT + F2 to hide this menu",
+};
+static const int kControllerSetupLineCount =
+    (int)(sizeof(kControllerSetupLines) / sizeof(kControllerSetupLines[0]));
+
+static int ControllerSetupLineHeight(HDC hdc)
+{
+    TEXTMETRICA tm;
+    ZeroMemory(&tm, sizeof(tm));
+    GetTextMetricsA(hdc, &tm);
+    return tm.tmHeight + 6;
+}
+
+// Caller must have the small font selected into hdc. Reports the panel's pixel size.
+static void MeasureControllerSetupPanel(HDC hdc, int* outW, int* outH)
+{
+    int maxW = 0;
+    for (int i = 0; i < kControllerSetupLineCount; i++)
+    {
+        SIZE s;
+        ZeroMemory(&s, sizeof(s));
+        GetTextExtentPoint32A(hdc, kControllerSetupLines[i], lstrlenA(kControllerSetupLines[i]), &s);
+        if (s.cx > maxW)
+            maxW = s.cx;
+    }
+    if (outW) *outW = maxW;
+    if (outH) *outH = ControllerSetupLineHeight(hdc) * kControllerSetupLineCount;
+}
+
+// Caller must have the small font selected into hdc. Returns the y just below the panel.
+static int DrawControllerSetupPanel(HDC hdc, int x, int y)
+{
+    int lineHeight = ControllerSetupLineHeight(hdc);
+    for (int i = 0; i < kControllerSetupLineCount; i++)
+    {
+        COLORREF fill = (i == 0) ? RGB(255, 220, 40)    // gold heading
+                                 : RGB(245, 245, 245);  // white body
+        DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), fill, kControllerSetupLines[i]);
+        y += lineHeight;
+    }
+    return y;
+}
+
 static void FormatFixedField(char* out, int outSize, int value, int width, const char* missing)
 {
     if (!out || outSize <= 0)
@@ -5256,7 +5338,20 @@ static void PaintOverlay(HWND hwnd)
     int widthEstimate = hpFieldWidth + markerGutterWidth + 360;
     int totalLines = (int)rows.size();
 
-    if (totalLines < 1)
+    // Spacewar controller-setup panel rides above the rows in the same block, anchored
+    // to the same corner. It is gated by the master toggle so Shift+F3 hides it too.
+    bool drawSetup = g_showControllerSetup && g_overlayVisible;
+    int setupWidth = 0;
+    int setupHeight = 0;
+    if (drawSetup)
+    {
+        SelectObject(hdc, smallFont);
+        MeasureControllerSetupPanel(hdc, &setupWidth, &setupHeight);
+        if (setupWidth + 8 > widthEstimate)
+            widthEstimate = setupWidth + 8;
+    }
+
+    if (totalLines < 1 && !drawSetup)
     {
         SelectObject(hdc, oldFont); // fonts are cached; do not delete
         if (hdc == backHdc)
@@ -5275,7 +5370,7 @@ static void PaintOverlay(HWND hwnd)
         return;
     }
 
-    int blockHeight = totalLines * lineHeight;
+    int blockHeight = setupHeight + totalLines * lineHeight;
     int overlayWidth = rc.right - rc.left;
     int overlayHeight = rc.bottom - rc.top;
 
@@ -5293,6 +5388,13 @@ static void PaintOverlay(HWND hwnd)
 
     if (y < g_paddingY)
         y = g_paddingY;
+
+    // Draw the controller-setup panel first; rows fall in below it.
+    if (drawSetup)
+    {
+        SelectObject(hdc, smallFont);
+        y = DrawControllerSetupPanel(hdc, x, y);
+    }
 
     // Master hotkey toggle: skip all row drawing but still blit the cleared buffer.
     for (size_t i = 0; g_overlayVisible && i < rows.size(); i++)
@@ -6408,7 +6510,11 @@ static void RenderOverlayToDIBAndSubmit()
         }
     }
 
-    if (rows.empty())
+    // The controller-setup panel can render on its own at the main menu, where no
+    // player rows exist yet. g_overlayVisible was already checked above.
+    bool drawSetup = g_showControllerSetup;
+
+    if (rows.empty() && !drawSetup)
     {
         D3DOverlay_Submit(NULL, 0, 0, (int)g_corner, g_paddingX, g_paddingY);
         return;
@@ -6497,8 +6603,19 @@ static void RenderOverlayToDIBAndSubmit()
         }
     }
 
+    // Measure the controller-setup panel so the bitmap fits it above the rows.
+    int setupWidth = 0;
+    int setupHeight = 0;
+    if (drawSetup)
+    {
+        SelectObject(hdc, smallFont);
+        MeasureControllerSetupPanel(hdc, &setupWidth, &setupHeight);
+    }
+
     int contentW = nameX + maxNameWidth + 8;
-    int contentH = blockHeight + 2;
+    if (drawSetup && setupWidth + 8 > contentW)
+        contentW = setupWidth + 8;
+    int contentH = blockHeight + setupHeight + 2;
     if (contentW < 1) contentW = 1;
     if (contentH < 1) contentH = 1;
 
@@ -6528,6 +6645,14 @@ static void RenderOverlayToDIBAndSubmit()
 
         int x = 0;
         int y = 0;
+
+        // Controller-setup panel rides above the rows in the same bitmap.
+        if (drawSetup)
+        {
+            SelectObject(hdc, smallFont);
+            y = DrawControllerSetupPanel(hdc, x, y);
+        }
+
         for (size_t i = 0; i < rows.size(); i++)
         {
             const OverlayRow& row = rows[i];
@@ -6715,25 +6840,69 @@ static DWORD WINAPI OverlayThread(LPVOID)
 // Polls the configured virtual-key and flips g_overlayVisible on a rising edge.
 // Only fires while the game window is focused so the bind never triggers while the
 // user is alt-tabbed and typing elsewhere.
+static bool ShowSteamControllerBindingPanel();   // defined below, near the nudge thread
+
 static DWORD WINAPI HotkeyThread(LPVOID)
 {
     WriteLogLine("Hotkey thread started.");
     bool prevDown = false;
+    bool setupPrevDown = false;
+    // Optional manual trigger for the Steam controller binding panel (0 = off).
+    int bindKey = GetPrivateProfileIntA("Controller", "BindingNudgeKey", 0, g_iniPath);
+    bool bindPrevDown = false;
     while (g_running)
     {
+        // Resolve game focus once per tick; the binds below only fire while the game
+        // window is foreground so they never trigger while alt-tabbed and typing.
+        bool gameFocused = false;
+        HWND fg = GetForegroundWindow();
+        if (fg != NULL)
+        {
+            DWORD fgPid = 0;
+            GetWindowThreadProcessId(fg, &fgPid);
+            gameFocused = (fgPid == GetCurrentProcessId());
+        }
+
+        if (bindKey > 0 && bindKey <= 255)
+        {
+            bool bd = (GetAsyncKeyState(bindKey) & 0x8000) != 0;
+            if (bd && !bindPrevDown)
+            {
+                WriteLogf("ControllerNudge: manual trigger via hotkey (vk=0x%02X).", bindKey);
+                ShowSteamControllerBindingPanel();
+            }
+            bindPrevDown = bd;
+        }
+
+        // Controller-setup hide bind (default Shift+F2). On a rising edge it hides the
+        // panel and persists ShowControllerSetup=0 so it stays hidden across launches.
+        {
+            int setupKey = g_controllerSetupHideKey;
+            if (g_showControllerSetup && setupKey > 0 && setupKey <= 255)
+            {
+                bool down = (GetAsyncKeyState(setupKey) & 0x8000) != 0;
+                bool modOk = (g_controllerSetupHideModifier <= 0) ||
+                    ((GetAsyncKeyState(g_controllerSetupHideModifier) & 0x8000) != 0);
+
+                if (down && !setupPrevDown && gameFocused && modOk)
+                {
+                    g_showControllerSetup = false;
+                    WritePrivateProfileStringA("Overlay", "ShowControllerSetup", "0", g_iniPath);
+                    WriteLogf("Controller setup panel hidden via hotkey (vk=0x%02X mod=0x%02X); ShowControllerSetup=0 saved.",
+                        setupKey, g_controllerSetupHideModifier);
+                }
+                setupPrevDown = down;
+            }
+            else
+            {
+                setupPrevDown = false;
+            }
+        }
+
         int key = g_toggleKey;
         if (key > 0 && key <= 255)
         {
             bool down = (GetAsyncKeyState(key) & 0x8000) != 0;
-
-            bool gameFocused = false;
-            HWND fg = GetForegroundWindow();
-            if (fg != NULL)
-            {
-                DWORD fgPid = 0;
-                GetWindowThreadProcessId(fg, &fgPid);
-                gameFocused = (fgPid == GetCurrentProcessId());
-            }
 
             // Optional modifier must be held at the moment the key goes down.
             bool modOk = (g_toggleModifier <= 0) ||
@@ -6816,19 +6985,255 @@ static DWORD WINAPI WatchdogThread(LPVOID)
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// Steam controller "binding panel" nudge.
+//
+// We launch under Steam appid 480 (Spacewar). Spacewar's stock controller
+// config is Valve's "Official Configuration", which uses inputs that don't map
+// to a real pad, so controllers appear dead in-game until the user manually
+// applies Steam's "Gamepad" template. The correct binding is a SIGNED,
+// cloud-synced blob we can't forge, but Steam exposes ShowBindingPanel(), which
+// pops the in-overlay configurator one step from Browse Configs -> Templates ->
+// Gamepad. We fire it once per install when a controller is actually connected.
+//
+// PTDE's bundled steam_api.dll is too old (ISteamController v001) to reach
+// ShowBindingPanel, so we drive a modern steam_api.dll shipped beside us
+// (default "mctde_input.dll") through its named *flat* exports. We never call
+// SteamAPI_Init on it (that would be a second init and could disturb the game's
+// networking / DSCM) — instead we borrow the game's already-valid HSteamUser/
+// HSteamPipe and resolve the interface straight out of the running steamclient.
+// All flat exports are __cdecl, so an arg-count mismatch across SDK versions is
+// harmless (the caller cleans the stack). Everything is __try-guarded; the worst
+// failure mode is "no panel appears", never a crash.
+// ---------------------------------------------------------------------------
+
+typedef int      (__cdecl* SteamHandleGetter_t)();                                  // GetHSteamUser/Pipe
+typedef void*    (__cdecl* SteamInternal_CreateInterface_t)(const char*);
+typedef void*    (__cdecl* SteamInternal_FindOrCreateUserInterface_t)(int, const char*);
+typedef void*    (__cdecl* GetISteamInput_t)(void*, int, int, const char*);
+typedef bool     (__cdecl* ISteamInput_Init_t)(void*, bool);
+typedef void     (__cdecl* ISteamInput_RunFrame_t)(void*, bool);
+typedef int      (__cdecl* ISteamInput_GetConnectedControllers_t)(void*, uint64_t*);
+typedef bool     (__cdecl* ISteamInput_ShowBindingPanel_t)(void*, uint64_t);
+
+#define MCTDE_STEAM_INPUT_MAX 16
+
+// Resolve ISteamInput from the running Steam client and pop the binding panel if
+// a controller is connected. Returns true only if ShowBindingPanel reported the
+// overlay opened. Never throws; logs every step.
+static bool ShowSteamControllerBindingPanel()
+{
+    HMODULE gameApi = GetModuleHandleA("steam_api.dll");
+    if (!gameApi)
+    {
+        WriteLogLine("ControllerNudge: steam_api.dll not loaded yet; skipping.");
+        return false;
+    }
+
+    SteamHandleGetter_t getUser = (SteamHandleGetter_t)GetProcAddress(gameApi, "SteamAPI_GetHSteamUser");
+    SteamHandleGetter_t getPipe = (SteamHandleGetter_t)GetProcAddress(gameApi, "SteamAPI_GetHSteamPipe");
+    if (!getUser || !getPipe)
+    {
+        WriteLogLine("ControllerNudge: game steam_api.dll missing GetHSteamUser/Pipe exports.");
+        return false;
+    }
+
+    int hUser = 0, hPipe = 0;
+    __try { hUser = getUser(); hPipe = getPipe(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { WriteLogLine("ControllerNudge: GetHSteamUser/Pipe crashed."); return false; }
+    if (hUser == 0)
+    {
+        WriteLogLine("ControllerNudge: HSteamUser is 0 (Steam not ready); will retry next launch.");
+        return false;
+    }
+
+    // Locate the modern steam_api.dll we ship beside our DLL.
+    char modName[64] = {0};
+    GetPrivateProfileStringA("Controller", "BindingNudgeModule", "mctde_input.dll",
+                             modName, sizeof(modName), g_iniPath);
+    char modPath[MAX_PATH];
+    lstrcpynA(modPath, g_iniPath, MAX_PATH);
+    char* slash = strrchr(modPath, '\\');
+    if (slash) slash[1] = '\0'; else modPath[0] = '\0';
+    lstrcatA(modPath, modName);
+
+    HMODULE modApi = LoadLibraryA(modPath);
+    if (!modApi)
+    {
+        WriteLogf("ControllerNudge: could not load modern Steam DLL '%s' (err=%lu). "
+                  "Ship a current steam_api.dll under that name to enable the controller nudge.",
+                  modPath, GetLastError());
+        return false;
+    }
+
+    SteamInternal_FindOrCreateUserInterface_t findIface =
+        (SteamInternal_FindOrCreateUserInterface_t)GetProcAddress(modApi, "SteamInternal_FindOrCreateUserInterface");
+    SteamInternal_CreateInterface_t createIface =
+        (SteamInternal_CreateInterface_t)GetProcAddress(modApi, "SteamInternal_CreateInterface");
+    GetISteamInput_t getInput =
+        (GetISteamInput_t)GetProcAddress(modApi, "SteamAPI_ISteamClient_GetISteamInput");
+    ISteamInput_Init_t inputInit =
+        (ISteamInput_Init_t)GetProcAddress(modApi, "SteamAPI_ISteamInput_Init");
+    ISteamInput_RunFrame_t inputRunFrame =
+        (ISteamInput_RunFrame_t)GetProcAddress(modApi, "SteamAPI_ISteamInput_RunFrame");
+    ISteamInput_GetConnectedControllers_t inputGetControllers =
+        (ISteamInput_GetConnectedControllers_t)GetProcAddress(modApi, "SteamAPI_ISteamInput_GetConnectedControllers");
+    ISteamInput_ShowBindingPanel_t inputShowPanel =
+        (ISteamInput_ShowBindingPanel_t)GetProcAddress(modApi, "SteamAPI_ISteamInput_ShowBindingPanel");
+
+    if (!inputInit || !inputGetControllers || !inputShowPanel || (!findIface && !(createIface && getInput)))
+    {
+        WriteLogLine("ControllerNudge: modern Steam DLL is missing required flat exports; aborting.");
+        return false;
+    }
+
+    // The version string MUST match the SteamInput interface version that
+    // BindingNudgeModule's flat wrappers were built against: steamclient returns
+    // an object whose vtable matches the requested version, and the shipped DLL's
+    // SteamAPI_ISteamInput_* wrappers call a slot baked for *their* version. A
+    // mismatch points the wrapper at the wrong slot. Defaults match the bundled
+    // mctde_input.dll; override both if you ship a different SDK build.
+    char inputVer[32], clientVer[32];
+    GetPrivateProfileStringA("Controller", "BindingNudgeInputVersion", "SteamInput002",
+                             inputVer, sizeof(inputVer), g_iniPath);
+    GetPrivateProfileStringA("Controller", "BindingNudgeClientVersion", "SteamClient020",
+                             clientVer, sizeof(clientVer), g_iniPath);
+
+    void* input = NULL;
+    __try
+    {
+        if (findIface)
+        {
+            void* p = findIface(hUser, inputVer);
+            if (LooksLikePointer((uintptr_t)p)) { input = p; WriteLogf("ControllerNudge: ISteamInput via FindOrCreateUserInterface(%s).", inputVer); }
+        }
+        if (!input && createIface && getInput)
+        {
+            void* client = createIface(clientVer);
+            if (LooksLikePointer((uintptr_t)client))
+            {
+                void* p = getInput(client, hUser, hPipe, inputVer);
+                if (LooksLikePointer((uintptr_t)p)) { input = p; WriteLogf("ControllerNudge: ISteamInput via %s/%s.", clientVer, inputVer); }
+            }
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { WriteLogLine("ControllerNudge: interface resolution crashed."); return false; }
+
+    if (!input)
+    {
+        WriteLogLine("ControllerNudge: could not resolve ISteamInput from steamclient; aborting.");
+        return false;
+    }
+
+    int timeoutMs = GetPrivateProfileIntA("Controller", "BindingNudgeControllerTimeoutMs", 6000, g_iniPath);
+    bool shown = false;
+    __try
+    {
+        inputInit(input, false);
+
+        uint64_t handles[MCTDE_STEAM_INPUT_MAX];
+        int count = 0;
+        for (int waited = 0; waited <= timeoutMs; waited += 250)
+        {
+            if (inputRunFrame) inputRunFrame(input, true);
+            ZeroMemory(handles, sizeof(handles));
+            count = inputGetControllers(input, handles);
+            if (count > 0) break;
+            Sleep(250);
+        }
+
+        if (count <= 0)
+        {
+            WriteLogLine("ControllerNudge: no controller connected; not nudging (keyboard/mouse user).");
+            return false;   // leave the sentinel unwritten so we retry when a pad is plugged in
+        }
+
+        WriteLogf("ControllerNudge: %d controller(s) connected; opening binding panel for handle %08X%08X.",
+                  count, (DWORD)(handles[0] >> 32), (DWORD)(handles[0] & 0xFFFFFFFF));
+        shown = inputShowPanel(input, handles[0]);
+        WriteLogf("ControllerNudge: ShowBindingPanel returned %s.", shown ? "true (overlay opened)" : "false (overlay disabled or unavailable)");
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) { WriteLogLine("ControllerNudge: Init/poll/ShowBindingPanel crashed."); return false; }
+
+    return shown;
+}
+
+// Once-per-install driver: gated by [Controller] BindingNudge, a marker file, and
+// an actually-connected controller. Runs on its own thread so a slow Steam
+// handshake never blocks overlay startup.
+static DWORD WINAPI ControllerNudgeThread(LPVOID)
+{
+    if (GetPrivateProfileIntA("Controller", "BindingNudge", 1, g_iniPath) == 0)
+    {
+        WriteLogLine("ControllerNudge: disabled via [Controller] BindingNudge=0.");
+        return 0;
+    }
+
+    // Marker file beside the INI so the nudge only fires until it succeeds once.
+    char marker[MAX_PATH];
+    lstrcpynA(marker, g_iniPath, MAX_PATH);
+    char* slash = strrchr(marker, '\\');
+    if (slash) slash[1] = '\0'; else marker[0] = '\0';
+    lstrcatA(marker, "mctde-link.controller.done");
+
+    bool force = GetPrivateProfileIntA("Controller", "BindingNudgeForce", 0, g_iniPath) != 0;
+    if (!force && GetFileAttributesA(marker) != INVALID_FILE_ATTRIBUTES)
+    {
+        WriteLogLine("ControllerNudge: already done (marker present); skipping.");
+        return 0;
+    }
+
+    // Let Steam's overlay and input subsystem settle before we ask for the panel.
+    int waitMs = GetPrivateProfileIntA("Controller", "BindingNudgeWaitMs", 9000, g_iniPath);
+    if (waitMs > 0) Sleep(waitMs);
+
+    if (ShowSteamControllerBindingPanel())
+    {
+        HANDLE h = CreateFileA(marker, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            const char* note = "mctde-Link opened the Steam controller binding panel once.\r\n";
+            DWORD wrote = 0;
+            WriteFile(h, note, (DWORD)strlen(note), &wrote, NULL);
+            CloseHandle(h);
+        }
+        WriteLogLine("ControllerNudge: binding panel shown; marker written.");
+    }
+    return 0;
+}
+
 static DWORD WINAPI DelayedStartThread(LPVOID)
 {
-    WriteLogLine("Delayed start thread started. Sleeping before overlay init.");
-    Sleep(8000);
+    WriteLogLine("Delayed start thread started.");
 
-    WriteLogLine("Delayed start awake. Starting overlay systems.");
-    LoadConfig(true);
+    // --- Early overlay bring-up (no settle delay) -------------------------------
+    // The controller-setup panel has to be on screen at the very first frame -- the
+    // pre-title "OK" prompt -- because a player whose controller isn't configured yet
+    // can't advance past it to reach the title screen where it used to appear. Overlay
+    // rendering and the dismiss hotkey touch no game memory, so they run immediately.
+    // Only the hook install + memory pollers below still wait for the game to settle.
+    LoadConfig(true); // also enables the D3D overlay (D3DOverlay_SetEnabled)
 
     if (!g_rowsLockReady)
     {
         InitializeCriticalSection(&g_rowsLock);
         g_rowsLockReady = true;
     }
+
+    g_running = true;
+
+    HANDLE overlay = CreateThread(NULL, 0, OverlayThread, NULL, 0, NULL);
+    if (overlay)
+        CloseHandle(overlay);
+
+    HANDLE hotkey = CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
+    if (hotkey)
+        CloseHandle(hotkey);
+
+    // --- Let the game finish loading, then wire up the memory-facing systems ----
+    WriteLogLine("Overlay up at startup; sleeping before hook install.");
+    Sleep(8000);
+    WriteLogLine("Delayed start awake. Installing hooks and starting pollers.");
 
     if (!g_identityLockReady)
     {
@@ -6845,8 +7250,6 @@ static DWORD WINAPI DelayedStartThread(LPVOID)
 
     InstallHooks();
 
-    g_running = true;
-
     HANDLE poll = CreateThread(NULL, 0, PollThread, NULL, 0, NULL);
     if (poll)
         CloseHandle(poll);
@@ -6859,19 +7262,15 @@ static DWORD WINAPI DelayedStartThread(LPVOID)
     if (truePing)
         CloseHandle(truePing);
 
-    HANDLE hotkey = CreateThread(NULL, 0, HotkeyThread, NULL, 0, NULL);
-    if (hotkey)
-        CloseHandle(hotkey);
-
     HANDLE watchdog = CreateThread(NULL, 0, WatchdogThread, NULL, 0, NULL);
     if (watchdog)
         CloseHandle(watchdog);
 
     StartWebSocketServer();
 
-    HANDLE overlay = CreateThread(NULL, 0, OverlayThread, NULL, 0, NULL);
-    if (overlay)
-        CloseHandle(overlay);
+    HANDLE ctrlNudge = CreateThread(NULL, 0, ControllerNudgeThread, NULL, 0, NULL);
+    if (ctrlNudge)
+        CloseHandle(ctrlNudge);
 
     WriteLogLine("Delayed start finished.");
     return 0;

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.6 - Spacewar Setup
+
+- Added an on-screen "Spacewar Controller Setup" panel: step-by-step instructions for mapping a controller through Steam's Gamepad template.
+- The panel now appears at the very first frame (the pre-title "OK" prompt) instead of waiting for the title screen, so a player whose controller isn't set up yet can read the steps before they're stuck.
+- Press Shift+F2 (while the game window is focused) to hide the panel. This also writes `ShowControllerSetup=0` to `mctde-link.ini`, so it stays hidden on every later launch. Set it back to `1` by hand to bring it back.
+- New `[Overlay]` keys: `ShowControllerSetup`, `ControllerSetupHideKey`, `ControllerSetupHideModifier`.
+
 ## v0.4.5 - Clean Exit
 
 - When the game is started without the launcher (Steam-direct launch or a folder double-click), the mod still closes the game and reopens the launcher — but now spawns the launcher outside Steam's kill-on-close job. Previously the reopened launcher stayed in Steam's process tree, so Steam kept counting the game as running even after it closed; now Steam registers the close.

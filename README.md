@@ -1,10 +1,10 @@
 # mctde-Link
 
-`mctde-Link` is a `d3d9.dll` proxy for Dark Souls: Prepare to Die Edition. Drop it in the game `DATA` folder and it adds the MCTDE PvP overlay, HP display, true-ping side channel, DLL chainloading, popup suppression, and a built-in phantom-cap raiser — built for competition-grade PTDE PvP where every slot, HP read, and latency swing matters.
+`mctde-Link` is a `d3d9.dll` proxy for Dark Souls: Prepare to Die Edition. Drop it in the game `DATA` folder and it adds the MCTDE PvP overlay, HP display, true-ping side channel, DLL chainloading, popup suppression, and a built-in phantom-cap raiser. It is built for competition-grade PTDE PvP where every slot, HP read, and latency swing matters.
 
 ## Features
 
-- Compact roster overlay: player HP, names, ping, and role/color styling — anchorable to any corner, with the local-player row hideable.
+- Compact roster overlay: player HP, names, ping, and role/color styling (anchorable to any corner, with the local-player row hideable).
 - True ping for peers also running `mctde-Link` (Steam side channel), with cached/session ping fallback for everyone else. Optional smoothing for stable reads.
 - HP display using PTDE/Ashley-style offsets.
 - Built-in **PhantomUnleashed** phantom-cap raiser (see below).
@@ -21,14 +21,14 @@ Grab the latest release zip from GitHub Releases (this repo is source only). Cop
 Dark Souls Prepare to Die Edition/DATA/
 ```
 
-`README.md` and `CONFIG_REFERENCE.md` are reference only — keep them wherever. To chainload other DLLs, drop them in the `[Compatibility] ChainloadFolder` (default `mctde-Link_Chainload`, next to `d3d9.dll`).
+`README.md` and `CONFIG_REFERENCE.md` are reference only (keep them wherever). To chainload other DLLs, drop them in the `[Compatibility] ChainloadFolder` (default `mctde-Link_Chainload`, next to `d3d9.dll`).
 
 ## PhantomUnleashed (built-in phantom-cap raiser)
 
-Lifts PTDE's stock 4-player limit, built right into `d3d9.dll` — no extra DLL needed. On launch you get a **Yes / No** prompt:
+Lifts PTDE's stock 4-player limit, built right into `d3d9.dll` (no extra DLL needed). On launch you get a **Yes / No** prompt:
 
-- **No** — nothing is patched; you stay in the normal pool and connect with everyone.
-- **Yes** — the cap is raised and you join a **segregated pool**, so vanilla players are never pulled into a larger session.
+- **No**: nothing is patched; you stay in the normal pool and connect with everyone.
+- **Yes**: the cap is raised and you join a **segregated pool**, so vanilla players are never pulled into a larger session.
 
 Configure it in `mctde-link.ini`:
 
@@ -41,13 +41,13 @@ MemoryPoolMB=192  ; internal memory pool (stock ~10 MB is too small for many pha
 VerifyOnly=1      ; 1 = only log the offset self-check, never patch. Set 0 to apply.
 ```
 
-**Segregation** is via `NetworkVersion`: DS1 only pairs players whose 1-byte version matches, so a raised cap *alone* doesn't separate you from vanilla — the version does. **Memory:** stock DS1's ~10 MB pool can't hold many phantoms' models/gear/animations, so the pool is raised (default 192 MB, max 255). Note DARKSOULS.exe is 32-bit (~2 GB address space, 4 GB with DSFix's Large Address Aware).
+**Segregation** is via `NetworkVersion`: DS1 only pairs players whose 1-byte version matches, so a raised cap *alone* doesn't separate you from vanilla. The version does. **Memory:** stock DS1's ~10 MB pool can't hold many phantoms' models/gear/animations, so the pool is raised (default 192 MB, max 255). Note DARKSOULS.exe is 32-bit (~2 GB address space, 4 GB with DSFix's Large Address Aware).
 
 Patching happens on the main thread at the first Direct3D call, before the window opens; every patch is reversible and auto-reverts on close. A VERIFY report is always written to `PhantomUnleashed.log` next to `d3d9.dll`.
 
-> Ships with `VerifyOnly=1` (log-only, never modifies the game) — set `VerifyOnly=0` to apply. Stage 2 runtime trampolines (what makes a >4 session stable) are calibrated for `MaxPhantoms=18`.
+> Ships with `VerifyOnly=1` (log-only, never modifies the game). Set `VerifyOnly=0` to apply. Stage 2 runtime trampolines (what makes a >4 session stable) are calibrated for `MaxPhantoms=18`.
 >
-> **Do not run alongside Phantom_Break** — both patch the same offsets and double-patching crashes. PhantomUnleashed detects a loaded/chainloaded `Phantom_Break.dll` and refuses to apply. To use Phantom Break instead, set `Mode=Off` and chainload it as a `GenericDLL`.
+> **Do not run alongside Phantom_Break**: both patch the same offsets and double-patching crashes. PhantomUnleashed detects a loaded/chainloaded `Phantom_Break.dll` and refuses to apply. To use Phantom Break instead, set `Mode=Off` and chainload it as a `GenericDLL`.
 
 This is a rewrite of Metal-Crow's MultiPhantom / [Dark Souls Overhaul](https://github.com/metal-crow/Dark-Souls-1-Overhaul) phantom-limit patch on `mctde-Link`'s own reversible patch engine; the patch sites, offsets, and AoB patterns are Metal-Crow's reverse-engineering work.
 

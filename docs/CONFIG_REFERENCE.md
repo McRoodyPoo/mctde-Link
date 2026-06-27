@@ -18,17 +18,17 @@ Names a folder next to `d3d9.dll` that will be scanned for additional DLLs to lo
 
 ## Controller
 
-First-launch helper for the Steam controller binding. Because the mod launches under Steam appid 480 (Spacewar), Steam applies Spacewar's stock "Official Configuration", which maps to inputs no real pad has — so controllers appear dead in-game until you manually apply Steam's **Gamepad** template. The actual config binding is a signed, cloud-synced blob that can't be written from outside Steam, so instead we call Steam's `ShowBindingPanel()` to pop the in-overlay configurator (one step from Browse Configs → Templates → Gamepad). It fires **once per install**, and only when a controller is actually connected (keyboard/mouse users are never nudged). Success is recorded in a marker file (`mctde-link.controller.done`) so it never nags again; delete that file to re-arm it.
+First-launch helper for the Steam controller binding. Because the mod launches under Steam appid 480 (Spacewar), Steam applies Spacewar's stock "Official Configuration", which maps to inputs no real pad has. As a result, controllers appear dead in-game until you manually apply Steam's **Gamepad** template. The actual config binding is a signed, cloud-synced blob that can't be written from outside Steam, so instead we call Steam's `ShowBindingPanel()` to pop the in-overlay configurator (one step from Browse Configs → Templates → Gamepad). It fires **once per install**, and only when a controller is actually connected (keyboard/mouse users are never nudged). Success is recorded in a marker file (`mctde-link.controller.done`) so it never nags again; delete that file to re-arm it.
 
 PTDE's bundled `steam_api.dll` is too old (`ISteamController` v001) to reach `ShowBindingPanel`, so this drives a **modern `steam_api.dll` shipped beside `d3d9.dll`** (default name `mctde_input.dll`) through its named flat exports. We never re-init Steam, so the game's networking/DSCM is untouched. If that DLL is absent the feature simply no-ops (logged when `[Settings] EnableLogging=1`).
 
-`BindingNudge=1` — master on/off (`0` disables).
-`BindingNudgeForce=0` — `1` re-shows every launch, ignoring the once-done marker (testing only).
-`BindingNudgeModule=mctde_input.dll` — filename of the modern Steam DLL to drive.
-`BindingNudgeInputVersion=SteamInput002` / `BindingNudgeClientVersion=SteamClient020` — Steam interface version strings. These **must** match the SDK `BindingNudgeModule` was built from: steamclient returns an interface whose vtable matches the requested version, and the shipped DLL's flat wrappers call a slot baked for *their* version — a mismatch points the wrapper at the wrong slot. The bundled `mctde_input.dll` is `SteamInput002`/`SteamClient020`; only change these if you swap in a different `steam_api.dll` build.
-`BindingNudgeWaitMs=9000` — delay after overlay start before nudging, so Steam's overlay/input subsystem settle.
-`BindingNudgeControllerTimeoutMs=6000` — how long to poll for a connected controller before giving up for this launch (no marker is written, so it retries next launch).
-`BindingNudgeKey=0` — optional manual re-trigger key (Windows virtual-key code; `0` = off) to open the panel on demand if first-launch timing missed.
+`BindingNudge=1`: master on/off (`0` disables).
+`BindingNudgeForce=0`: `1` re-shows every launch, ignoring the once-done marker (testing only).
+`BindingNudgeModule=mctde_input.dll`: filename of the modern Steam DLL to drive.
+`BindingNudgeInputVersion=SteamInput002` / `BindingNudgeClientVersion=SteamClient020`: Steam interface version strings. These **must** match the SDK `BindingNudgeModule` was built from: steamclient returns an interface whose vtable matches the requested version, and the shipped DLL's flat wrappers call a slot baked for *their* version. A mismatch points the wrapper at the wrong slot. The bundled `mctde_input.dll` is `SteamInput002`/`SteamClient020`; only change these if you swap in a different `steam_api.dll` build.
+`BindingNudgeWaitMs=9000`: delay after overlay start before nudging, so Steam's overlay/input subsystem settle.
+`BindingNudgeControllerTimeoutMs=6000`: how long to poll for a connected controller before giving up for this launch (no marker is written, so it retries next launch).
+`BindingNudgeKey=0`: optional manual re-trigger key (Windows virtual-key code; `0` = off) to open the panel on demand if first-launch timing missed.
 
 ## DLLs
 
@@ -42,7 +42,7 @@ Built-in phantom-cap raiser (rewrite of Metal-Crow's MultiPhantom / Dark Souls O
 
 `Mode=Ask`
 
-`Ask` shows a Yes/No prompt at launch (default, **No** highlighted). `On` always enables without a prompt; `Off` never enables. **Linux/Proton:** the `Ask` prompt is not supported and is skipped (PhantomUnleashed stays off) — set `Mode=On` or `Mode=Off` manually.
+`Ask` shows a Yes/No prompt at launch (default, **No** highlighted). `On` always enables without a prompt; `Off` never enables. **Linux/Proton:** the `Ask` prompt is not supported and is skipped (PhantomUnleashed stays off). Set `Mode=On` or `Mode=Off` manually.
 
 `MaxPhantoms=18`
 
@@ -116,7 +116,7 @@ Optional supported key. If present and set to `0`, rows without a learned identi
 
 `ShowControllerSetup=1`
 
-Shows a step-by-step "Spacewar Controller Setup" instruction panel above the player rows (it renders on its own at the main menu, before any players are present). Pressing the hide bind — default Shift+F2, while the game window is focused — hides the panel and writes `ShowControllerSetup=0` here, so the instructions stay hidden on every later launch. Set it back to `1` by hand to bring them back.
+Shows a step-by-step "Spacewar Controller Setup" instruction panel above the player rows (it renders on its own at the main menu, before any players are present). Pressing the hide bind (default Shift+F2, while the game window is focused) hides the panel and writes `ShowControllerSetup=0` here, so the instructions stay hidden on every later launch. Set it back to `1` by hand to bring them back.
 
 `ControllerSetupHideModifier=0x10` / `ControllerSetupHideKey=0x71`
 

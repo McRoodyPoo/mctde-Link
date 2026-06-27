@@ -9,7 +9,7 @@
 
 ## v0.4.5 - Clean Exit
 
-- When the game is started without the launcher (Steam-direct launch or a folder double-click), the mod still closes the game and reopens the launcher — but now spawns the launcher outside Steam's kill-on-close job. Previously the reopened launcher stayed in Steam's process tree, so Steam kept counting the game as running even after it closed; now Steam registers the close.
+- When the game is started without the launcher (Steam-direct launch or a folder double-click), the mod still closes the game and reopens the launcher. It now spawns the launcher outside Steam's kill-on-close job. Previously the reopened launcher stayed in Steam's process tree, so Steam kept counting the game as running even after it closed; now Steam registers the close.
 
 ## v0.4.4 - Homecoming
 
@@ -38,7 +38,7 @@
 - Overlay now shows up to 18 players.
 - Enlarges the game's memory pool so larger sessions have room.
 - Won't run alongside Phantom_Break, to avoid a crash.
-- Linux/Proton: the Ask prompt is unsupported — set Mode=On or Off in mctde-link.ini.
+- Linux/Proton: the Ask prompt is unsupported. Set Mode=On or Off in mctde-link.ini.
 - Special thanks to Metal-Crow for permission to use his reverse engineering and techniques.
 
 ## v0.2.1 - Steam Bendoverlay
@@ -48,7 +48,7 @@
 
 ## v0.2.0 - Auto-Update
 
-- Added an in-game auto-updater. When a newer version is available, choosing **Yes** on the update prompt now downloads and installs the latest build automatically, then relaunches Dark Souls — no manual download needed.
+- Added an in-game auto-updater. When a newer version is available, choosing **Yes** on the update prompt now downloads and installs the latest build automatically, then relaunches Dark Souls (no manual download needed).
 - The updater always pulls the newest release, so players who skipped several versions still land on the current build in one step. Your `mctde-link.ini` settings are preserved across updates.
 - Choosing **No** now opens the latest releases page and closes the game.
 - mctde (on NexusMods) keeps its manual download flow, since it can't be installed automatically.

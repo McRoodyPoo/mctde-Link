@@ -41,7 +41,7 @@ bool PhantomUnleashedStage1_Prepare(const PhantomUnleashedConfig& cfg);
 int  PhantomUnleashedStage1_Verify();
 
 // Apply the staged static patches (Stage 1). NOTE: not a complete multiphantom on its
-// own — Stage 2 trampolines are required before a >4 session is stable.
+// own. Stage 2 trampolines are required before a >4 session is stable.
 bool PhantomUnleashedStage1_Apply();
 
 // Revert everything. Safe to call from DLL_PROCESS_DETACH / watchdog teardown.

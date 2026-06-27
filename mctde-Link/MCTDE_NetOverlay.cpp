@@ -4870,8 +4870,8 @@ static void UpdateOverlayPosition()
         g_overlayStyleApplied = true;
     }
 
-    // Only move/resize when the target actually changed — and never with SWP_FRAMECHANGED,
-    // which forced a non-client recalc + recomposition on every tick.
+    // Only move/resize when the target actually changed (and never with SWP_FRAMECHANGED,
+    // which forced a non-client recalc + recomposition on every tick).
     if (topLeft.x != g_lastOverlayRect.left || topLeft.y != g_lastOverlayRect.top ||
         width != g_lastOverlayRect.right || height != g_lastOverlayRect.bottom)
     {
@@ -5266,7 +5266,7 @@ static void PaintOverlay(HWND hwnd)
 
     SetBkMode(hdc, TRANSPARENT);
 
-    // Cached fonts (created once / on config change) — see EnsureWindowFonts().
+    // Cached fonts (created once / on config change). See EnsureWindowFonts().
     HFONT smallFont = g_winSmallFont;
     HFONT hpFont = g_winHpFont;
 
@@ -7000,7 +7000,7 @@ static DWORD WINAPI WatchdogThread(LPVOID)
 // ShowBindingPanel, so we drive a modern steam_api.dll shipped beside us
 // (default "mctde_input.dll") through its named *flat* exports. We never call
 // SteamAPI_Init on it (that would be a second init and could disturb the game's
-// networking / DSCM) — instead we borrow the game's already-valid HSteamUser/
+// networking / DSCM). Instead we borrow the game's already-valid HSteamUser/
 // HSteamPipe and resolve the interface straight out of the running steamclient.
 // All flat exports are __cdecl, so an arg-count mismatch across SDK versions is
 // harmless (the caller cleans the stack). Everything is __try-guarded; the worst

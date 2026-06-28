@@ -19,7 +19,7 @@
 // Installed versions bundled with this release.
 // Change these every time you release a new version.
 #define CURRENT_MCTDE_VERSION "0.88"
-#define CURRENT_MCTDE_LINK_VERSION "0.4.6"
+#define CURRENT_MCTDE_LINK_VERSION "0.4.7"
 
 // Your GitHub raw file host.
 #define VERSION_HOST L"raw.githubusercontent.com"

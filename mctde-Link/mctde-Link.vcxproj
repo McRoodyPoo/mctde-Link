@@ -91,6 +91,7 @@
     <ClInclude Include="PatchEngine.h" />
     <ClInclude Include="PhantomUnleashedStage1.h" />
     <ClInclude Include="PhantomUnleashedStage2.h" />
+    <ClInclude Include="HideSoulCounter.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
@@ -102,6 +103,7 @@
     <ClCompile Include="PatchEngine.cpp" />
     <ClCompile Include="PhantomUnleashedStage1.cpp" />
     <ClCompile Include="PhantomUnleashedStage2.cpp" />
+    <ClCompile Include="HideSoulCounter.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="version.rc" />

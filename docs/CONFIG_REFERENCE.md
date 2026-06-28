@@ -60,6 +60,30 @@ Raises the game's internal memory pool (stock ~10 MB is too small for many phant
 
 `0` applies the patches when enabled (normal). `1` only writes the offset self-check to `PhantomUnleashed.log` and never modifies the game.
 
+## HideSoulCounter
+
+Hides the bottom-right HUD soul counter. Reversible (reverts on game close); no DSFix and no texture edits. Off by default.
+
+`Enabled=0`
+
+`1` hides the soul-counter number (a single byte flip in the soul widget, located by a unique signature so it survives relocation). `0` leaves it.
+
+`HideGainPopup=1`
+
+Also suppress the transient `+N souls gained` popup that flashes on load-in and when you pick up souls.
+
+`HideBox=0`
+
+`1` hides the ENTIRE bottom-right soul display (box + icon + number + popup) by clearing the dialog's own draw-enable byte each frame. Supersedes the number/popup hides above.
+
+`HideRegion=0`
+
+`1` drops every 2D HUD draw landing in a bottom-right rectangle (works at the D3D9 layer, so it does not go boxy during fades). `RegionX`/`RegionY` (default `0.78`/`0.78`) set the rectangle's top-left as a fraction of screen size.
+
+`VerifyOnly=1`
+
+`1` only writes the self-check to `HideSoulCounter.log` and never modifies the game (default). Set `0` with `Enabled=1` to actually hide it.
+
 ## Overlay
 
 `ShowHeader=1`

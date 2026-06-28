@@ -11,16 +11,20 @@
     This is a rewrite for mctde-Link's patch engine, with attribution; no source text is
     intentionally copied.
 
-    SAFE DEFAULT: [PhantomUnleashed] VerifyOnly=1. Until that is flipped to 0, the engine
-    only logs a VERIFY report and never writes -- so a wrong offset can never corrupt
-    the running game. Keep it at 1 until the log shows 0 mismatches AND Stage 2
-    (offset-shift trampolines) is in place; Stage 1 alone is not a stable >4 session.
+    VerifyOnly: [PhantomUnleashed] VerifyOnly=1 makes the engine only log a VERIFY report
+    and never write -- so a wrong offset can never corrupt the running game. The shipped
+    default is now 0 (apply), since the offsets are verified and Stage 2 is in place; the
+    Apply path is still gated on a clean Verify (0 mismatches), so a bad exe is refused
+    rather than patched. Set VerifyOnly=1 by hand to force log-only on a suspect exe.
+    MigrateIni() backfills this key for older inis so a missing key applies like the
+    shipped ini instead of silently defaulting to log-only.
 */
 #include <windows.h>
 #include <string>
 #include <cstdio>
 #include <cstdlib>
 #include <cctype>
+#include <cstring>
 
 #include "PhantomUnleashed.h"
 #include "PatchEngine.h"
@@ -123,11 +127,59 @@ bool RunningUnderWine() {
     return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
 }
 
+// ---- ini self-migration ----------------------------------------------------
+// An ini that predates 0.4.1 carries a [MorePhantoms] section and NO
+// [PhantomUnleashed] one; an ini the launcher created may hold only Mode=. Either
+// way some keys are absent, and the missing-key code defaults (notably VerifyOnly,
+// which falls back to 1 = "log only, never patch") silently disable the feature --
+// the player ticks the box and stays in the vanilla pool. Fill ONLY the absent
+// keys (an existing value is never overwritten, so the player's settings survive),
+// pulling a value forward from a legacy [MorePhantoms] entry when present, else a
+// shipped default. The pre-0.4.1 defaults matched (NetworkVersion=0x4D, MaxPhantoms=18,
+// VerifyOnly=0), so a migrated install lands in the same pool as everyone else.
+const char* const kAbsent = "\x01";   // a value no real ini holds
+
+std::string IniGet(const char* section, const char* key, const std::string& ini) {
+    char buf[64] = { 0 };
+    GetPrivateProfileStringA(section, key, kAbsent, buf, sizeof(buf), ini.c_str());
+    return (strcmp(buf, kAbsent) == 0) ? std::string() : std::string(buf);
+}
+
+void EnsureKey(const char* key, const char* def, const std::string& ini) {
+    if (!IniGet("PhantomUnleashed", key, ini).empty()) return;   // already set -> keep it
+    const std::string legacy = IniGet("MorePhantoms", key, ini);
+    const std::string val = legacy.empty() ? std::string(def) : legacy;
+    WritePrivateProfileStringA("PhantomUnleashed", key, val.c_str(), ini.c_str());
+    mp::Log(std::string("ini migrate: [PhantomUnleashed] ") + key + " = " + val
+            + (legacy.empty() ? " (default)" : " (from [MorePhantoms])"));
+}
+
+// Idempotent; safe to call from both Prompt() and Start(). Runs once per process.
+void MigrateIni() {
+    static bool once = false;
+    if (once) return;
+    once = true;
+    const std::string ini = IniPath();
+    // Only ever FILL GAPS in an ini that already exists -- never create one here. A missing ini is
+    // seeded with the full documented default by the launcher (EnsureIniSeeded); if we wrote keys
+    // into a missing file we'd produce exactly the bare-bones, comment-less ini we're avoiding.
+    if (GetFileAttributesA(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        mp::Log("ini migrate: no mctde-link.ini present; the launcher seeds the full default. Skipping.");
+        return;
+    }
+    EnsureKey("Mode",           "Ask",  ini);   // preserves an existing On/Off choice
+    EnsureKey("MaxPhantoms",    "18",   ini);
+    EnsureKey("NetworkVersion", "0x4D", ini);
+    EnsureKey("MemoryPoolMB",   "192",  ini);
+    EnsureKey("VerifyOnly",     "0",    ini);   // the key that was silently defaulting to 1
+}
+
 } // namespace
 
 void PhantomUnleashed_Prompt() {
     if (g_promptResolved) return;
     EnsureLogSink();
+    MigrateIni();   // backfill missing keys BEFORE we read Mode (so a stale/partial ini behaves)
 
     const std::string ini = IniPath();
     const Mode mode = ReadMode(ini);
@@ -181,11 +233,15 @@ void PhantomUnleashed_Start() {
     EnsureLogSink();
     if (g_startDone) return;                       // idempotent: gate runs exactly once
     g_startDone = true;
+    MigrateIni();                                  // safety: backfill even if Prompt was skipped
     if (!g_promptResolved) PhantomUnleashed_Prompt();  // safety: never start un-gated
 
     const std::string ini = IniPath();
     const int maxPhantoms = GetPrivateProfileIntA("PhantomUnleashed", "MaxPhantoms", 18, ini.c_str());
-    const int verifyOnly  = GetPrivateProfileIntA("PhantomUnleashed", "VerifyOnly",  1, ini.c_str());
+    // VerifyOnly default is 0 (apply): the feature is shipped + verified, and MigrateIni() writes
+    // the key for any stale ini, so a missing key should behave like the shipped ini, not silently
+    // disable. A bad exe is still caught -- Verify counts mismatches and Apply is refused below.
+    const int verifyOnly  = GetPrivateProfileIntA("PhantomUnleashed", "VerifyOnly",  0, ini.c_str());
 
     // NetworkVersion (the matchmaking pool key) is read as a string so both decimal ("77")
     // and hex ("0x4D") are accepted. Default 0x4D. Vanilla retail is 0x2E.

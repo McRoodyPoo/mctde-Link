@@ -8,6 +8,7 @@
 #include <algorithm>
 #include "D3DOverlay.h"
 #include "PhantomUnleashed.h"
+#include "HideSoulCounter.h"
 
 #ifdef MCTDE_LINK_SINGLE_DLL
 extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule);
@@ -705,6 +706,9 @@ extern "C" void* WINAPI Direct3DCreate9(UINT SDKVersion)
     // prompt and applies the phantom-cap patches + pool segregation while the game is still
     // blocked here, so they are guaranteed to be in place before the game opens. Idempotent.
     PhantomUnleashed_Start();
+    // Same gate point: blank the HUD soul-counter number if [HideSoulCounter] opts in.
+    // Idempotent; runs on the game's main thread before device creation.
+    HideSoulCounter_Start();
 #endif
 
     LoadCompatibilityDllsOnce();
@@ -736,6 +740,9 @@ extern "C" HRESULT WINAPI Direct3DCreate9Ex(UINT SDKVersion, void** ppD3D)
     // See Direct3DCreate9 above: gate PhantomUnleashed on the game's main thread before it
     // proceeds. Idempotent -- whichever Create entry the game uses, this runs exactly once.
     PhantomUnleashed_Start();
+    // Same gate point: blank the HUD soul-counter number if [HideSoulCounter] opts in.
+    // Idempotent; runs on the game's main thread before device creation.
+    HideSoulCounter_Start();
 #endif
 
     LoadCompatibilityDllsOnce();

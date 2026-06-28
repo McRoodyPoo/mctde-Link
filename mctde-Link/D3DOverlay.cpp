@@ -15,6 +15,8 @@
 #include <windows.h>
 #include <d3d9.h>
 #include <vector>
+#include <cstdlib>
+#include <cstring>
 #include "D3DOverlay.h"
 
 // WriteHubLog lives in dllmain.cpp (external linkage).
@@ -213,6 +215,16 @@ static void DrawQuad(IDirect3DDevice9* dev)
     case 3: x = sw - w - g_drawPadX; y = sh - h - g_drawPadY; break;
     default: x = g_drawPadX;         y = g_drawPadY;          break;
     }
+    {   // one-shot geometry diagnostic (gated by [Settings] EnableLogging)
+        static int s_geomLog = 0;
+        if (s_geomLog < 3) {
+            char b[192];
+            wsprintfA(b, "[overlay-geom] viewport=%dx%d bitmap=%dx%d corner=%d pad=%d,%d -> drawpos=%d,%d",
+                      sw, sh, w, h, g_drawCorner, g_drawPadX, g_drawPadY, x, y);
+            WriteHubLog(b);
+            s_geomLog++;
+        }
+    }
     float u = (float)w / g_texW, v = (float)h / g_texH, fx = (float)x - 0.5f, fy = (float)y - 0.5f;
     TLV verts[4] = {
         { fx,     fy,     0, 1, 0xFFFFFFFF, 0, 0 },
@@ -311,8 +323,171 @@ static void DrawOverlayFrame(IDirect3DDevice9* dev)
 }
 
 // ------------------------------------------------------------
-// Device wrapper -- inner to DSFix by construction
+// Hide-region: skip the game's 2D HUD draws in the bottom-right corner (the soul counter).
+// The minimal, artifact-free version of DSFix's HUD draw-skip: the game's HUD reaches our
+// MctdeDevice wrapper as DrawPrimitiveUP/DrawIndexedPrimitiveUP. Those quads carry vertex-shader
+// POSITION in NDC (clip space: x in [-1,1] left..right, y in [-1,1] bottom..top), so a UP draw
+// whose EVERY vertex sits in the bottom-right NDC region is HUD in that corner -- we drop it.
+// The test is pure float reads + compares (NO device queries, NO disk I/O), safe in the per-draw
+// hot path. 3D world geometry is rejected cheaply (its POSITION is in large world units, far
+// outside NDC). Our own overlay draws through the RAW device and is never seen here.
 // ------------------------------------------------------------
+static bool  g_hideRegion = false;
+static float g_ndcX0 = 0.55f;        // drop when every vertex x > this (toward the right edge)
+static float g_ndcY0 = -0.55f;       // ...and y < this (toward the bottom; NDC +1 is top, -1 bottom)
+static bool  g_hideRegionLoaded = false;
+
+static void LoadHideRegionConfig()
+{
+    if (g_hideRegionLoaded) return;
+    g_hideRegionLoaded = true;
+    char path[MAX_PATH] = { 0 };
+    HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&LoadHideRegionConfig), &self);
+    GetModuleFileNameA(self, path, MAX_PATH);
+    char* slash = strrchr(path, '\\');
+    if (slash) lstrcpyA(slash + 1, "mctde-link.ini"); else lstrcpyA(path, "mctde-link.ini");
+    g_hideRegion = GetPrivateProfileIntA("HideSoulCounter", "HideRegion", 0, path) != 0;
+    char buf[32];
+    GetPrivateProfileStringA("HideSoulCounter", "RegionX", "0.55",  buf, sizeof(buf), path); g_ndcX0 = (float)atof(buf);
+    GetPrivateProfileStringA("HideSoulCounter", "RegionY", "-0.55", buf, sizeof(buf), path); g_ndcY0 = (float)atof(buf);
+    if (g_ndcX0 < -1.5f || g_ndcX0 > 1.5f) g_ndcX0 = 0.55f;
+    if (g_ndcY0 < -1.5f || g_ndcY0 > 1.5f) g_ndcY0 = -0.55f;
+}
+
+static UINT PrimVertCount(D3DPRIMITIVETYPE t, UINT pc)
+{
+    switch (t) {
+        case D3DPT_POINTLIST:     return pc;
+        case D3DPT_LINELIST:      return pc * 2;
+        case D3DPT_LINESTRIP:     return pc + 1;
+        case D3DPT_TRIANGLELIST:  return pc * 3;
+        case D3DPT_TRIANGLESTRIP: return pc + 2;
+        case D3DPT_TRIANGLEFAN:   return pc + 2;
+        default:                  return 0;
+    }
+}
+
+// True if every vertex of this UP draw sits in the bottom-right NDC region (the HUD corner).
+// Pure float math -- no COM calls, no I/O -- so it is safe to run per draw.
+static bool AllVertsInNdcRegion(const void* vtx, UINT stride, UINT nverts)
+{
+    if (!g_hideRegion || !vtx || stride < 8 || nverts == 0 || nverts > 64) return false;
+    const float* v0 = (const float*)vtx;
+    if (v0[0] < -2.f || v0[0] > 2.f || v0[1] < -2.f || v0[1] > 2.f) return false; // not NDC -> 3D, keep
+    const char* p = (const char*)vtx;
+    for (UINT i = 0; i < nverts; ++i) {
+        const float* f = (const float*)(p + (size_t)i * stride);
+        if (f[0] <= g_ndcX0 || f[1] >= g_ndcY0) return false; // a vertex outside the corner -> keep
+    }
+    return true; // whole quad in the bottom-right -> drop it
+}
+
+// ---- texture recognition + SAFE HUD-draw capture (identify the soul-counter draw) ----------
+// We don't yet know which texture/draw the soul counter is, so capture it. DSFix recognizes
+// textures by hashing their source bytes at load (D3DXCreateTextureFromFileInMemory); we hook
+// the same call (one-time IAT swap). Per draw we only store a pointer + two shorts into an
+// in-memory ring; the ring is written to disk ONCE every few seconds from Present -- so there
+// is no per-draw file I/O (that was the earlier crash). Gated by HideRegion.
+// SuperFastHash (c) Paul Hsieh -- identical to DSFix's, so hashes line up with its tex dumps.
+static UINT32 SFHash(const char* data, int len) {
+    UINT32 hash = len, tmp; int rem;
+    if (len <= 0 || data == NULL) return 0;
+    rem = len & 3; len >>= 2;
+    for (; len > 0; len--) {
+        hash += *(const UINT16*)data;
+        tmp = (*(const UINT16*)(data + 2) << 11) ^ hash;
+        hash = (hash << 16) ^ tmp; data += 4; hash += hash >> 11;
+    }
+    switch (rem) {
+        case 3: hash += *(const UINT16*)data; hash ^= hash << 16;
+                hash ^= ((signed char)data[2]) << 18; hash += hash >> 11; break;
+        case 2: hash += *(const UINT16*)data; hash ^= hash << 11; hash += hash >> 17; break;
+        case 1: hash += (signed char)*data; hash ^= hash << 10; hash += hash >> 1;
+    }
+    hash ^= hash << 3; hash += hash >> 5; hash ^= hash << 4;
+    hash += hash >> 17; hash ^= hash << 25; hash += hash >> 6;
+    return hash;
+}
+
+struct TexHash { IDirect3DTexture9* tex; UINT32 hash; };
+static TexHash       g_texMap[8192];
+static volatile LONG g_texCount = 0;
+static UINT32 LookupTexHash(IDirect3DBaseTexture9* t) {
+    LONG n = g_texCount; if (n > 8192) n = 8192;
+    for (LONG i = 0; i < n; ++i) if (g_texMap[i].tex == (IDirect3DTexture9*)t) return g_texMap[i].hash;
+    return 0;
+}
+
+typedef HRESULT (WINAPI* D3DXCreateTexFIM_t)(LPDIRECT3DDEVICE9, LPCVOID, UINT, LPDIRECT3DTEXTURE9*);
+static D3DXCreateTexFIM_t g_realD3DXCreate = nullptr;
+static HRESULT WINAPI Hook_D3DXCreate(LPDIRECT3DDEVICE9 dev, LPCVOID src, UINT size, LPDIRECT3DTEXTURE9* out) {
+    HRESULT hr = g_realD3DXCreate(dev, src, size, out);
+    if (SUCCEEDED(hr) && out && *out && src && size) {
+        LONG i = InterlockedIncrement(&g_texCount) - 1;
+        if (i < 8192) { g_texMap[i].tex = *out; g_texMap[i].hash = SFHash((const char*)src, (int)size); }
+    }
+    return hr;
+}
+static void InstallD3DXHook(HMODULE mod) {
+    if (g_realD3DXCreate || !mod) return;
+    BYTE* base = (BYTE*)mod;
+    auto dos = (IMAGE_DOS_HEADER*)base;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return;
+    auto nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    auto dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dir.VirtualAddress) return;
+    for (auto imp = (IMAGE_IMPORT_DESCRIPTOR*)(base + dir.VirtualAddress); imp->Name; ++imp) {
+        ULONG origRVA = imp->OriginalFirstThunk ? imp->OriginalFirstThunk : imp->FirstThunk;
+        auto thunk = (IMAGE_THUNK_DATA*)(base + imp->FirstThunk);
+        auto orig  = (IMAGE_THUNK_DATA*)(base + origRVA);
+        for (; orig->u1.AddressOfData; ++thunk, ++orig) {
+            if (orig->u1.Ordinal & IMAGE_ORDINAL_FLAG32) continue;
+            auto ibn = (IMAGE_IMPORT_BY_NAME*)(base + orig->u1.AddressOfData);
+            if (strcmp((const char*)ibn->Name, "D3DXCreateTextureFromFileInMemory") == 0) {
+                g_realD3DXCreate = (D3DXCreateTexFIM_t)thunk->u1.Function;
+                DWORD op = 0; VirtualProtect(&thunk->u1.Function, sizeof(void*), PAGE_READWRITE, &op);
+                thunk->u1.Function = (ULONG_PTR)&Hook_D3DXCreate;
+                VirtualProtect(&thunk->u1.Function, sizeof(void*), op, &op);
+                return;
+            }
+        }
+    }
+}
+
+struct DrawRec { IDirect3DBaseTexture9* tex; short x, y; unsigned short nv; };
+static DrawRec                     g_ring[256];
+static volatile LONG               g_ringPos = 0;
+static IDirect3DBaseTexture9*      g_boundTex0 = nullptr;   // texture bound at stage 0
+static void RingPushDraw(const void* vtx, UINT stride, UINT nverts) {
+    if (!vtx || stride < 8 || nverts == 0 || nverts > 64) return;
+    const float* v = (const float*)vtx;
+    if (v[0] < -2.f || v[0] > 2.f || v[1] < -2.f || v[1] > 2.f) return; // NDC/UI only (skip 3D)
+    LONG i = (InterlockedIncrement(&g_ringPos) - 1) & 255;
+    g_ring[i].tex = g_boundTex0;
+    g_ring[i].x = (short)(v[0] * 1000.f); g_ring[i].y = (short)(v[1] * 1000.f);
+    g_ring[i].nv = (unsigned short)nverts;
+}
+static void RingFlush() {
+    char path[MAX_PATH] = { 0 }; HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&RingFlush), &self);
+    GetModuleFileNameA(self, path, MAX_PATH);
+    char* s = strrchr(path, '\\'); if (s) lstrcpyA(s + 1, "HudCapture.log");
+    HANDLE f = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD w = 0; char hdr[80];
+    int hn = wsprintfA(hdr, "texturesHashed=%d ringNDC-UI-draws follow (hash nv pos x1000):\r\n", (int)g_texCount);
+    WriteFile(f, hdr, hn, &w, nullptr);
+    for (int i = 0; i < 256; ++i) {
+        DrawRec& r = g_ring[i];
+        if (!r.tex && r.x == 0 && r.y == 0 && r.nv == 0) continue;
+        char line[128]; int n = wsprintfA(line, "hash=%08X nv=%u pos=(%d,%d)\r\n", LookupTexHash(r.tex), r.nv, r.x, r.y);
+        WriteFile(f, line, n, &w, nullptr);
+    }
+    CloseHandle(f);
+}
 
 class MctdeDevice : public IDirect3DDevice9
 {
@@ -362,6 +537,7 @@ public:
     STDMETHODIMP Present(const RECT* a, const RECT* b, HWND c, const RGNDATA* d) override
     {
         DrawOverlayFrame(m_real);
+        if (g_hideRegion) { static long fr = 0; if ((++fr % 180) == 0) RingFlush(); } // dump HUD capture ~every few s
         return m_real->Present(a, b, c, d);
     }
 
@@ -426,7 +602,7 @@ public:
     STDMETHODIMP SetClipStatus(const D3DCLIPSTATUS9* c) override { return m_real->SetClipStatus(c); }
     STDMETHODIMP GetClipStatus(D3DCLIPSTATUS9* c) override { return m_real->GetClipStatus(c); }
     STDMETHODIMP GetTexture(DWORD s, IDirect3DBaseTexture9** t) override { return m_real->GetTexture(s, t); }
-    STDMETHODIMP SetTexture(DWORD s, IDirect3DBaseTexture9* t) override { return m_real->SetTexture(s, t); }
+    STDMETHODIMP SetTexture(DWORD s, IDirect3DBaseTexture9* t) override { if (s == 0) g_boundTex0 = t; return m_real->SetTexture(s, t); }
     STDMETHODIMP GetTextureStageState(DWORD s, D3DTEXTURESTAGESTATETYPE t, DWORD* v) override { return m_real->GetTextureStageState(s, t, v); }
     STDMETHODIMP SetTextureStageState(DWORD s, D3DTEXTURESTAGESTATETYPE t, DWORD v) override { return m_real->SetTextureStageState(s, t, v); }
     STDMETHODIMP GetSamplerState(DWORD s, D3DSAMPLERSTATETYPE t, DWORD* v) override { return m_real->GetSamplerState(s, t, v); }
@@ -444,8 +620,14 @@ public:
     STDMETHODIMP_(float) GetNPatchMode() override { return m_real->GetNPatchMode(); }
     STDMETHODIMP DrawPrimitive(D3DPRIMITIVETYPE p, UINT s, UINT c) override { return m_real->DrawPrimitive(p, s, c); }
     STDMETHODIMP DrawIndexedPrimitive(D3DPRIMITIVETYPE p, INT bv, UINT mv, UINT nv, UINT si, UINT pc) override { return m_real->DrawIndexedPrimitive(p, bv, mv, nv, si, pc); }
-    STDMETHODIMP DrawPrimitiveUP(D3DPRIMITIVETYPE p, UINT c, const void* d, UINT st) override { return m_real->DrawPrimitiveUP(p, c, d, st); }
-    STDMETHODIMP DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE p, UINT mv, UINT nv, UINT pc, const void* id, D3DFORMAT idf, const void* vd, UINT vst) override { return m_real->DrawIndexedPrimitiveUP(p, mv, nv, pc, id, idf, vd, vst); }
+    STDMETHODIMP DrawPrimitiveUP(D3DPRIMITIVETYPE p, UINT c, const void* d, UINT st) override {
+        if (g_hideRegion) RingPushDraw(d, st, PrimVertCount(p, c)); // capture for identification
+        return m_real->DrawPrimitiveUP(p, c, d, st);
+    }
+    STDMETHODIMP DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE p, UINT mv, UINT nv, UINT pc, const void* id, D3DFORMAT idf, const void* vd, UINT vst) override {
+        if (g_hideRegion) RingPushDraw(vd, vst, nv); // capture for identification
+        return m_real->DrawIndexedPrimitiveUP(p, mv, nv, pc, id, idf, vd, vst);
+    }
     STDMETHODIMP ProcessVertices(UINT s, UINT d, UINT c, IDirect3DVertexBuffer9* db, IDirect3DVertexDeclaration9* vd, DWORD f) override { return m_real->ProcessVertices(s, d, c, db, vd, f); }
     STDMETHODIMP CreateVertexDeclaration(const D3DVERTEXELEMENT9* e, IDirect3DVertexDeclaration9** d) override { return m_real->CreateVertexDeclaration(e, d); }
     STDMETHODIMP SetVertexDeclaration(IDirect3DVertexDeclaration9* d) override { return m_real->SetVertexDeclaration(d); }
@@ -520,6 +702,8 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateDevice(
         // patches the shared vtable (it does so lazily, at its first Present). Our in-Present
         // overlay then opens its extra scene without re-firing Steam's compositor.
         D3DOverlay_CaptureRawScene(*ppDevice);
+        LoadHideRegionConfig();                 // read [HideSoulCounter] HideRegion/RegionX/RegionY once
+        InstallD3DXHook(GetModuleHandleA(nullptr)); // hook D3DX texture loads to hash/identify textures
         *ppDevice = new MctdeDevice(*ppDevice); // hand the caller (DSFix) our wrapper
         WriteHubLog("[overlay] CreateDevice wrapped (overlay is inner to DSFix).");
     }

@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.7 - PhantomPool
+
+- PhantomUnleashed now applies when enabled even if your ini was missing `VerifyOnly`, instead of silently doing nothing.
+- Missing PhantomUnleashed keys and legacy `[MorePhantoms]` settings now migrate forward automatically, no hand-editing.
+- New `HideSoulCounter`: hide the bottom-right soul counter number, the `+N` popup, the whole box, or a screen region.
+- New overlay HP bars: show each player's HP as a Souls-style gauge instead of a number (`[Overlay] HpBars=1`).
+
 ## v0.4.6 - Spacewar Setup
 
 - Added an on-screen "Spacewar Controller Setup" panel: step-by-step instructions for mapping a controller through Steam's Gamepad template.

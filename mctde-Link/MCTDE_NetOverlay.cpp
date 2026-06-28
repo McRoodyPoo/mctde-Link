@@ -10,6 +10,7 @@
 #include <d3d9.h>
 #include "D3DOverlay.h"
 #include "PhantomUnleashed.h"
+#include "HideSoulCounter.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -265,6 +266,8 @@ struct OverlayRow
     int hpCurrentOffset = -1;
     int hpMaxOffset = -1;
     ULONGLONG hpOneUntilTick = 0;
+    int hpGhost = -1;                 // pre-damage HP level for the lingering yellow chip
+    ULONGLONG hpGhostUntilTick = 0;   // when the yellow chip stops showing
     uintptr_t connection = 0;
     ULONGLONG learnedAgeMs = 0;
     int stickyRoute = 0;
@@ -287,6 +290,8 @@ static bool g_rowsLockReady = false;
 static std::vector<OverlayRow> g_rows;
 static std::vector<WorldActorRow> g_worldRows;
 static std::unordered_map<uintptr_t, ULONGLONG> g_oneHpUntilByChr;
+struct DmgGhost { int ghostHp; ULONGLONG untilTick; };
+static std::unordered_map<uintptr_t, DmgGhost> g_dmgGhostByChr;  // per-actor lingering damage chip
 static std::unordered_map<uint64_t, std::string> g_nameCacheBySteamId;
 static uint64_t g_localSteamId = 0;
 static std::unordered_map<uint64_t, CachedPingInfo> g_pingCacheBySteamId;
@@ -370,6 +375,7 @@ static bool g_showHp = true;
 // without touching the underlying subsystems: [HP] Enabled still gates HP polling, so
 // ShowHp=0 only removes the HP column from the drawn overlay.
 static bool g_showHpField = true;     // [Overlay] ShowHp
+static bool g_hpBars = false;         // [Overlay] HpBars -- draw HP as a filled bar, not a number
 static bool g_showName = true;        // [Overlay] ShowName
 static bool g_showLocalMarker = true; // [Overlay] ShowLocalMarker
 static bool g_showDisconnected = true;// [Overlay] ShowDisconnected: keep a "Disconnected" row
@@ -394,6 +400,7 @@ static int g_hpInstantRefillMinGain = 100;
 static int g_hpCurrentOffset = DEFAULT_HP_CURRENT_OFFSET;
 static int g_hpMaxOffset = DEFAULT_HP_MAX_OFFSET;
 static DWORD g_hpOneLingerMs = 500;
+static DWORD g_hpDmgLingerMs = 1000;  // [HP] DamageLingerMs -- how long the yellow damage chip lingers
 static DWORD g_identityTtlMs = 120000;
 
 // ------------------------------------------------------------
@@ -1047,6 +1054,7 @@ static void LoadConfig(bool logIt)
     g_showPing = GetPrivateProfileIntA("Overlay", "ShowPing", 1, g_iniPath) != 0;
     g_showName = GetPrivateProfileIntA("Overlay", "ShowName", 1, g_iniPath) != 0;
     g_showHpField = GetPrivateProfileIntA("Overlay", "ShowHp", 1, g_iniPath) != 0;
+    g_hpBars = GetPrivateProfileIntA("Overlay", "HpBars", 0, g_iniPath) != 0;
     g_showLocalMarker = GetPrivateProfileIntA("Overlay", "ShowLocalMarker", 1, g_iniPath) != 0;
     g_showDisconnected = GetPrivateProfileIntA("Overlay", "ShowDisconnected", 1, g_iniPath) != 0;
 
@@ -1107,6 +1115,7 @@ static void LoadConfig(bool logIt)
     g_hpMaxOffset = GetPrivateProfileIntA("HP", "MaxOffset", DEFAULT_HP_MAX_OFFSET, g_iniPath);
     g_hpAutoScan = GetPrivateProfileIntA("HP", "AutoScan", 0, g_iniPath) != 0;
     g_hpOneLingerMs = (DWORD)GetPrivateProfileIntA("HP", "OneHpLingerMs", 500, g_iniPath);
+    g_hpDmgLingerMs = (DWORD)GetPrivateProfileIntA("HP", "DamageLingerMs", 1000, g_iniPath);
     if (g_hpOneLingerMs > 5000)
         g_hpOneLingerMs = 5000;
 
@@ -5084,6 +5093,51 @@ static void DrawOverlayHp(HDC hdc, int x, int y, const OverlayRow& row, const ch
     DrawOverlayName(hdc, x, y, row, text);
 }
 
+// HP rendered as a Souls-style gauge: dark backing + a fill proportional to hp/hpMax, with a
+// 1px black outline. Colours shift green->amber->red as the bar empties; a live 1HP marker
+// flashes bright green. Drawn into the same color-keyed DIB, so it must avoid the magenta key.
+static void DrawOverlayHpBar(HDC hdc, int x, int y, int w, int h, const OverlayRow& row)
+{
+    if (row.hpMax <= 0 || w < 4 || h < 3)
+        return;
+    double frac = (double)row.hp / (double)row.hpMax;
+    if (frac < 0.0) frac = 0.0;
+    if (frac > 1.0) frac = 1.0;
+
+    ULONGLONG now = GetTickCount64();
+    double ghostFrac = 0.0;
+    if (row.hpGhost > row.hp && row.hpGhostUntilTick > now)
+    {
+        ghostFrac = (double)row.hpGhost / (double)row.hpMax;
+        if (ghostFrac > 1.0) ghostFrac = 1.0;
+    }
+
+    RECT bg = { x, y, x + w, y + h };
+    HBRUSH bgb = CreateSolidBrush(RGB(58, 16, 16));      // empty backing
+    FillRect(hdc, &bg, bgb);
+    DeleteObject(bgb);
+
+    int fw = (int)(w * frac + 0.5);                      // current HP width (green)
+    int gw = (int)(w * ghostFrac + 0.5);                 // pre-damage width (top of yellow)
+
+    COLORREF fillCol = RGB(95, 175, 75);                 // current HP = green
+    if (row.hpOneUntilTick != 0 && now <= row.hpOneUntilTick)
+        fillCol = RGB(40, 255, 80);                      // bright green while 1HP marker lingers
+
+    // Bar always fills from the left, so HP depletes toward the right (the corner side when
+    // the bar is right-anchored).
+    if (gw > fw) { RECT yr = { x + fw, y, x + gw, y + h }; HBRUSH yb = CreateSolidBrush(RGB(230, 205, 55)); FillRect(hdc, &yr, yb); DeleteObject(yb); }
+    if (fw > 0)  { RECT fr = { x, y, x + fw, y + h };      HBRUSH fb = CreateSolidBrush(fillCol);          FillRect(hdc, &fr, fb); DeleteObject(fb); }
+
+    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+    HGDIOBJ op = SelectObject(hdc, pen);
+    HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, x, y, x + w, y + h);
+    SelectObject(hdc, op);
+    SelectObject(hdc, ob);
+    DeleteObject(pen);
+}
+
 // Spacewar controller-setup instruction panel. The first line is the gold heading;
 // the remaining lines are the white step-by-step body. Both backends share this.
 static const char* const kControllerSetupLines[] = {
@@ -5333,7 +5387,7 @@ static void PaintOverlay(HWND hwnd)
     bool drawHpField = g_showHp && g_showHpField;
     // The marker gutter collapses to zero when neither marker can ever appear.
     bool anyMarker = g_showPing || g_showLocalMarker;
-    int hpFieldWidth = drawHpField ? (hpMaxSize.cx + 6) : 0;
+    int hpFieldWidth = drawHpField ? ((g_hpBars ? hpMaxSize.cx * 2 : hpMaxSize.cx) + 6) : 0;
     int markerGutterWidth = anyMarker ? (markerMaxSize.cx + g_markerGutterExtra) : 0;
     int widthEstimate = hpFieldWidth + markerGutterWidth + 360;
     int totalLines = (int)rows.size();
@@ -5447,8 +5501,15 @@ static void PaintOverlay(HWND hwnd)
 
         if (drawHpField)
         {
-            SelectObject(hdc, hpFont);
-            DrawOverlayHp(hdc, x, hpY, row, hpLine);
+            if (g_hpBars && row.hasHp && row.hpMax > 0 && !row.disconnected)
+            {
+                DrawOverlayHpBar(hdc, x, hpY, hpFieldWidth - 6, hpTm.tmHeight, row);
+            }
+            else
+            {
+                SelectObject(hdc, hpFont);
+                DrawOverlayHp(hdc, x, hpY, row, hpLine);
+            }
         }
 
         SelectObject(hdc, smallFont);
@@ -6467,6 +6528,38 @@ static DWORD WINAPI HpPollThread(LPVOID)
 
                     break;
                 }
+
+                // Damage chip: when HP drops, hold the pre-hit level as a lingering yellow
+                // segment (so you can see how much was just taken). Rapid hits accumulate to
+                // the highest recent level until the linger expires.
+                if (row.hasHp && oldHadHp && oldHp >= 0 && row.hp < oldHp && row.hpMax > 0)
+                {
+                    int ghostHp = oldHp;
+                    std::unordered_map<uintptr_t, DmgGhost>::iterator g = g_dmgGhostByChr.find(row.chr);
+                    if (g != g_dmgGhostByChr.end() && g->second.untilTick > now && g->second.ghostHp > ghostHp)
+                        ghostHp = g->second.ghostHp;
+                    DmgGhost dg; dg.ghostHp = ghostHp; dg.untilTick = now + g_hpDmgLingerMs;
+                    g_dmgGhostByChr[row.chr] = dg;
+                }
+                {
+                    std::unordered_map<uintptr_t, DmgGhost>::iterator g = g_dmgGhostByChr.find(row.chr);
+                    if (g != g_dmgGhostByChr.end() && g->second.untilTick > now && g->second.ghostHp > row.hp)
+                    {
+                        row.hpGhost = g->second.ghostHp;
+                        row.hpGhostUntilTick = g->second.untilTick;
+                    }
+                    else
+                    {
+                        row.hpGhost = -1;
+                        row.hpGhostUntilTick = 0;
+                    }
+                }
+            }
+
+            for (std::unordered_map<uintptr_t, DmgGhost>::iterator it = g_dmgGhostByChr.begin(); it != g_dmgGhostByChr.end(); )
+            {
+                if (it->second.untilTick + 2000 < now) it = g_dmgGhostByChr.erase(it);
+                else ++it;
             }
 
             LeaveCriticalSection(&g_rowsLock);
@@ -6580,7 +6673,7 @@ static void RenderOverlayToDIBAndSubmit()
     bool drawHpField = g_showHp && g_showHpField;
     // The marker gutter collapses to zero when neither marker can ever appear.
     bool anyMarker = g_showPing || g_showLocalMarker;
-    int hpFieldWidth = drawHpField ? (hpMaxSize.cx + 6) : 0;
+    int hpFieldWidth = drawHpField ? ((g_hpBars ? hpMaxSize.cx * 2 : hpMaxSize.cx) + 6) : 0;
     int markerGutterWidth = anyMarker ? (markerMaxSize.cx + g_markerGutterExtra) : 0;
     int nameX = hpFieldWidth + markerGutterWidth;
     int totalLines = (int)rows.size();
@@ -6603,6 +6696,24 @@ static void RenderOverlayToDIBAndSubmit()
         }
     }
 
+    // Column order: HP | marker | name. On a RIGHT-anchored corner, mirror it to name | marker |
+    // HP so the HP element hugs the screen edge instead of the name (which otherwise leaves the
+    // whole row "padded" off the corner). Same total width either way.
+    bool rightAlign = (g_corner == CORNER_TOP_RIGHT || g_corner == CORNER_BOTTOM_RIGHT);
+    int colHpX, colMarkerX, colNameX;
+    if (rightAlign)
+    {
+        colNameX   = 0;
+        colMarkerX = maxNameWidth;
+        colHpX     = maxNameWidth + markerGutterWidth;
+    }
+    else
+    {
+        colHpX     = 0;
+        colMarkerX = hpFieldWidth;
+        colNameX   = hpFieldWidth + markerGutterWidth;
+    }
+
     // Measure the controller-setup panel so the bitmap fits it above the rows.
     int setupWidth = 0;
     int setupHeight = 0;
@@ -6612,7 +6723,7 @@ static void RenderOverlayToDIBAndSubmit()
         MeasureControllerSetupPanel(hdc, &setupWidth, &setupHeight);
     }
 
-    int contentW = nameX + maxNameWidth + 8;
+    int contentW = nameX + maxNameWidth + 3;   // small trailing margin (keeps the name outline unclipped)
     if (drawSetup && setupWidth + 8 > contentW)
         contentW = setupWidth + 8;
     int contentH = blockHeight + setupHeight + 2;
@@ -6693,12 +6804,20 @@ static void RenderOverlayToDIBAndSubmit()
 
             int hpY = y + ((lineHeight - hpTm.tmHeight) / 2);
             int smallY = y + ((lineHeight - smallTm.tmHeight) / 2);
-            int markerGutterX = x + hpFieldWidth;
+            int markerGutterX = x + colMarkerX;
+            int hpColX = x + colHpX;
 
             if (drawHpField)
             {
-                SelectObject(hdc, hpFont);
-                DrawOverlayHp(hdc, x, hpY, row, hpLine);
+                if (g_hpBars && row.hasHp && row.hpMax > 0 && !row.disconnected)
+                {
+                    DrawOverlayHpBar(hdc, hpColX, hpY, hpFieldWidth - 6, hpTm.tmHeight, row);
+                }
+                else
+                {
+                    SelectObject(hdc, hpFont);
+                    DrawOverlayHp(hdc, hpColX, hpY, row, hpLine);
+                }
             }
 
             SelectObject(hdc, smallFont);
@@ -6713,7 +6832,7 @@ static void RenderOverlayToDIBAndSubmit()
             }
 
             if (g_showName)
-                DrawOverlayName(hdc, nameX, smallY, row, nameLine);
+                DrawOverlayName(hdc, x + colNameX, smallY, row, nameLine);
 
             y += lineHeight;
         }
@@ -6977,6 +7096,7 @@ static DWORD WINAPI WatchdogThread(LPVOID)
             WriteLogLine("Watchdog: game window gone; forcing process exit to avoid a zombie process.");
             g_running = false;
             PhantomUnleashed_Restore(); // revert any applied phantom-cap patches before we exit
+            HideSoulCounter_Restore();  // revert the soul-counter patch too
             ExitProcess(0);
         }
     }
@@ -7304,6 +7424,7 @@ extern "C" void McTDE_NetOverlay_OnProcessDetach()
 {
     g_running = false;
     PhantomUnleashed_Restore(); // revert phantom-cap patches so a half-patched image never outlives us
+    HideSoulCounter_Restore();  // revert the soul-counter patch so a half-patched image never outlives us
     DisableTruePingTimerPeriod();
     StopWebSocketServer();
     D3DOverlay_Shutdown();

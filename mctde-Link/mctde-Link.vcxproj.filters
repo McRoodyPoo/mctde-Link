@@ -20,6 +20,7 @@
     <ClCompile Include="PatchEngine.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="PhantomUnleashedStage1.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="PhantomUnleashedStage2.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="HideSoulCounter.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="framework.h"><Filter>Header Files</Filter></ClInclude>
@@ -29,6 +30,7 @@
     <ClInclude Include="PatchEngine.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="PhantomUnleashedStage1.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="PhantomUnleashedStage2.h"><Filter>Header Files</Filter></ClInclude>
+    <ClInclude Include="HideSoulCounter.h"><Filter>Header Files</Filter></ClInclude>
   </ItemGroup>
   <ItemGroup>
     <Text Include="d3d9.def"><Filter>Source Files</Filter></Text>

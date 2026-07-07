@@ -28,3 +28,7 @@ void D3DOverlay_SetDrawAtPresent(bool atPresent);
 void D3DOverlay_Submit(const void* pixelsBGRA, int width, int height, int corner, int padX, int padY);
 
 void D3DOverlay_Shutdown();
+
+// Most recent render/viewport height (px), 0 until the first frame is drawn. Used to scale the
+// overlay's DS font by the game's UI factor so it matches the in-game menu font size.
+int  D3DOverlay_RenderHeight();

@@ -22,6 +22,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <ctype.h>
+#include "DSFont.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -40,6 +41,164 @@ static const COLORREF OVERLAY_TRANSPARENT_KEY = RGB(255, 0, 255);
 static char g_logPath[MAX_PATH];
 static char g_iniPath[MAX_PATH];
 static bool g_loggingEnabled = false;
+
+// ---- DSFont (the game's exact DS bitmap UI font). Off unless [Overlay] UseDsFont=1. ----
+// When on, the D3D overlay rasterizes its text with DSFont (Unicode Steam names, game-authentic
+// glyphs) instead of GDI/Tahoma. The GDI path stays intact as the fallback.
+static const int DS_UI_REF_H = 768;   // DS1 UI virtual height; overlay DS font = render/this scale
+static int  g_dsFontPercent = 100;    // [Overlay] DsFontPercent -- fine-tune DS font size vs in-game
+static int  g_hpBarScalePct = 100;    // [Overlay] HpBarScale -- fine-tune HP gauge size vs in-game (100 = 1:1)
+static int  g_dsFontSmooth = 1;       // [Overlay] DsFontSmooth -- 1 = bilinear (game-like), 0 = point
+static bool g_useDsFont = false;      // config toggle
+static bool g_dsFontTried = false;    // one-shot load attempt
+static int  g_dsCurPx = 16;           // pixel height of the current draw/measure context
+static uint32_t* g_rtBits = nullptr;  // BGRA (0xAARRGGBB) render target during D3D rasterize
+static int g_rtW = 0, g_rtH = 0, g_rtStride = 0;
+static bool g_rtActive = false;       // true only while the DS D3D bitmap is the live target
+static inline bool DsDraw() { return g_useDsFont && g_rtActive && DSFont_Ready(); }
+// Width measurement: DS font when enabled, else GDI. px = target pixel height.
+static void MeasA(HDC hdc, const char* s, int len, int px, SIZE* out) {
+    if (g_useDsFont && DSFont_Ready()) { out->cx = DSFont_MeasureUTF8(s, len, px); out->cy = px; }
+    else { ZeroMemory(out, sizeof(*out)); GetTextExtentPoint32A(hdc, s, len, out); }
+}
+// DS text is deferred during the row loop and replayed after the color-key pass, so GDI graphics
+// (HP bars, boxes) still get keyed to opaque and glyphs composite over the finished buffer.
+struct DsTextCmd { int x, y, px, rad; COLORREF fill, outline; std::string text; };
+static std::vector<DsTextCmd> g_dsCmds;
+// In DS ("Classic Font") mode only the steam name keeps its outline; all other text draws
+// borderless. Set true only around the name draw.
+static bool g_dsNameCtx = false;
+
+// --- Covenant/role icons (Classic Font mode): mctde_dsicons.bin, blitted left of phantom names. ---
+static std::vector<uint8_t> g_iconBlob;
+static int g_iconSz = 0, g_iconCount = 0;
+static std::vector<size_t> g_iconOff;     // byte offset of each icon's RGBA (R,G,B,A) in the blob
+static bool g_iconsReady = false;
+struct DsIconCmd { int idx, x, y, size; };
+static std::vector<DsIconCmd> g_dsIconCmds;   // deferred like text, composited after the color-key pass
+// Icon indices past the 8 covenant icons (0-7): host role + own-row marker.
+static const int ICON_HOST_HUMAN   = 8;   // Twin Humanities / Split Humanity -> human host
+static const int ICON_HOST_HOLLOW  = 9;   // Humanity                         -> hollow host
+static const int ICON_LOCAL_MARKER = 10;  // white circlet ring               -> own row marker
+
+static void LoadIcons(const std::wstring& path){
+    if(g_iconsReady) return;
+    HANDLE h=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(h==INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER sz; if(!GetFileSizeEx(h,&sz)||sz.QuadPart<20||sz.QuadPart>16*1024*1024){CloseHandle(h);return;}
+    g_iconBlob.resize((size_t)sz.QuadPart); DWORD rd=0; size_t done=0; bool ok=true;
+    while(done<g_iconBlob.size()){ if(!ReadFile(h,g_iconBlob.data()+done,(DWORD)(g_iconBlob.size()-done),&rd,nullptr)||rd==0){ok=false;break;} done+=rd; }
+    CloseHandle(h);
+    if(!ok || memcmp(g_iconBlob.data(),"MCTDEICO",8)!=0){ g_iconBlob.clear(); return; }
+    g_iconSz    = g_iconBlob[16] | (g_iconBlob[17]<<8);
+    g_iconCount = g_iconBlob[18] | (g_iconBlob[19]<<8);
+    size_t p=20; g_iconOff.clear();
+    for(int i=0;i<g_iconCount;++i){
+        if(p+4>g_iconBlob.size()){ g_iconOff.clear(); return; }
+        int w=g_iconBlob[p]|(g_iconBlob[p+1]<<8), hh=g_iconBlob[p+2]|(g_iconBlob[p+3]<<8);
+        g_iconOff.push_back(p+4); p += 4 + (size_t)w*hh*4;
+        if(p>g_iconBlob.size()){ g_iconOff.clear(); return; }
+    }
+    g_iconsReady = (g_iconCount>0 && g_iconSz>0);
+}
+
+// Blit icon idx scaled to size x size at (x,y) into the BGRA render target (straight-alpha src-over).
+static void BlitIconRT(int idx, int x, int y, int size){
+    if(!g_iconsReady || idx<0 || idx>=g_iconCount || size<=0 || !g_rtBits) return;
+    const uint8_t* ic = &g_iconBlob[g_iconOff[idx]]; int S=g_iconSz;
+    for(int dy=0;dy<size;++dy) for(int dx=0;dx<size;++dx){
+        float sx=(dx+0.5f)*S/size-0.5f, sy=(dy+0.5f)*S/size-0.5f;
+        int x0=(sx>=0)?(int)sx:(int)sx-1, y0=(sy>=0)?(int)sy:(int)sy-1;
+        float fx=sx-x0, fy=sy-y0;
+        auto smp=[&](int xx,int yy,int c)->float{ if(xx<0)xx=0; if(yy<0)yy=0; if(xx>=S)xx=S-1; if(yy>=S)yy=S-1; return (float)ic[(yy*S+xx)*4+c]; };
+        float rr[4]; for(int c=0;c<4;++c){ float t=smp(x0,y0,c)*(1-fx)+smp(x0+1,y0,c)*fx, b=smp(x0,y0+1,c)*(1-fx)+smp(x0+1,y0+1,c)*fx; rr[c]=t*(1-fy)+b*fy; }
+        float al=rr[3]/255.0f; if(al<=0.003f) continue;
+        int X=x+dx, Y=y+dy; if(X<0||Y<0||X>=g_rtW||Y>=g_rtH) continue;
+        uint32_t* dpx=&g_rtBits[(size_t)Y*g_rtStride+X];
+        int dr=(*dpx>>16)&255,dg=(*dpx>>8)&255,db=*dpx&255,da=(*dpx>>24)&255;
+        float dA=da/255.0f, oA=al+dA*(1-al); int nr,ng,nb,na;
+        if(oA<=0.001f){nr=ng=nb=na=0;} else {
+            nr=(int)((rr[0]*al+dr*dA*(1-al))/oA+0.5f); ng=(int)((rr[1]*al+dg*dA*(1-al))/oA+0.5f);
+            nb=(int)((rr[2]*al+db*dA*(1-al))/oA+0.5f); na=(int)(oA*255+0.5f); }
+        *dpx=((uint32_t)na<<24)|((uint32_t)nr<<16)|((uint32_t)ng<<8)|(uint32_t)nb;
+    }
+}
+// --- HP gauge frame (mctde_dsgauge.bin): the game's own segmented ruler, blitted over the red fill
+// so the overlay HP bar matches the in-game gauge. A 52x18 middle tile (divider + 4 ticks + top/bottom
+// bars) tiles horizontally at native scale (no smear); an 8x18 slice caps the right end. Both carry
+// real per-pixel alpha, so -- like text and icons -- they are deferred and composited AFTER the
+// color-key pass rather than GDI-drawn into the keyed buffer. ---
+static std::vector<uint8_t> g_gaugeBlob;
+static int g_gaugeTileW=0, g_gaugeTileH=0, g_gaugeCapW=0, g_gaugeCapH=0;
+static const uint8_t *g_gaugeTile=nullptr, *g_gaugeCap=nullptr;   // into g_gaugeBlob (stable after load)
+static bool g_gaugeReady=false;
+// UI scale for the gauge: the DS HUD is authored for a 768px-tall virtual screen and scaled by the
+// render resolution, so the gauge blits at g_gaugeTile* dims x this factor to sit 1:1 with the in-game
+// HP bar. Set per-frame in the D3D path; 1.0 for the GDI-window fallback. g_gaugeScalePct is an ini
+// override (100 = exact HUD match).
+static float g_gaugeScale = 1.0f;
+struct DsGaugeCmd { const uint8_t* src; int sw, sh, dx, dy, dw, dh; };
+static std::vector<DsGaugeCmd> g_dsGaugeCmds;   // deferred; flushed before icons/text in the post-key pass
+
+static void LoadGauge(const std::wstring& path){
+    if(g_gaugeReady) return;
+    HANDLE h=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(h==INVALID_HANDLE_VALUE) return;
+    LARGE_INTEGER sz; if(!GetFileSizeEx(h,&sz)||sz.QuadPart<24||sz.QuadPart>4*1024*1024){CloseHandle(h);return;}
+    g_gaugeBlob.resize((size_t)sz.QuadPart); DWORD rd=0; size_t done=0; bool ok=true;
+    while(done<g_gaugeBlob.size()){ if(!ReadFile(h,g_gaugeBlob.data()+done,(DWORD)(g_gaugeBlob.size()-done),&rd,nullptr)||rd==0){ok=false;break;} done+=rd; }
+    CloseHandle(h);
+    if(!ok || memcmp(g_gaugeBlob.data(),"MCTDEGAU",8)!=0){ g_gaugeBlob.clear(); return; }
+    g_gaugeTileW=g_gaugeBlob[16]|(g_gaugeBlob[17]<<8); g_gaugeTileH=g_gaugeBlob[18]|(g_gaugeBlob[19]<<8);
+    g_gaugeCapW =g_gaugeBlob[20]|(g_gaugeBlob[21]<<8); g_gaugeCapH =g_gaugeBlob[22]|(g_gaugeBlob[23]<<8);
+    size_t tileBytes=(size_t)g_gaugeTileW*g_gaugeTileH*4, capBytes=(size_t)g_gaugeCapW*g_gaugeCapH*4;
+    if(g_gaugeTileW<=0||g_gaugeTileH<=0||g_gaugeCapW<=0||g_gaugeCapH<=0
+       || 24+tileBytes+capBytes>g_gaugeBlob.size()){ g_gaugeBlob.clear(); return; }
+    g_gaugeTile=&g_gaugeBlob[24]; g_gaugeCap=&g_gaugeBlob[24+tileBytes];
+    g_gaugeReady=true;
+}
+
+// Straight-alpha src-over of an RGBA slice into the BGRA target, 2D bilinear-scaled from the source
+// (sw x sh) into the destination rect (dw x dh). The gauge is scaled to match the in-game HUD size,
+// so both axes scale here (upscaling from the small atlas tile stays soft/clean).
+static void BlitGaugeRT(const uint8_t* src, int sw, int sh, int dx, int dy, int dw, int dh){
+    if(!src || !g_rtBits || sw<=0 || sh<=0 || dw<=0 || dh<=0) return;
+    for(int j=0;j<dh;++j){
+        float sy=(dh>1)?((j+0.5f)*sh/dh-0.5f):0.0f;
+        int y0=(sy>=0)?(int)sy:(int)sy-1; float fy=sy-y0; int y1=y0+1;
+        if(y0<0)y0=0; if(y0>=sh)y0=sh-1; if(y1<0)y1=0; if(y1>=sh)y1=sh-1;
+        int Y=dy+j; if(Y<0||Y>=g_rtH) continue;
+        for(int i=0;i<dw;++i){
+            float sx=(dw>1)?((i+0.5f)*sw/dw-0.5f):0.0f;
+            int x0=(sx>=0)?(int)sx:(int)sx-1; float fx=sx-x0; int x1=x0+1;
+            if(x0<0)x0=0; if(x0>=sw)x0=sw-1; if(x1<0)x1=0; if(x1>=sw)x1=sw-1;
+            const uint8_t* p00=&src[((size_t)y0*sw+x0)*4]; const uint8_t* p10=&src[((size_t)y0*sw+x1)*4];
+            const uint8_t* p01=&src[((size_t)y1*sw+x0)*4]; const uint8_t* p11=&src[((size_t)y1*sw+x1)*4];
+            float rr[4]; for(int c=0;c<4;++c){ float t=p00[c]*(1-fx)+p10[c]*fx, b=p01[c]*(1-fx)+p11[c]*fx; rr[c]=t*(1-fy)+b*fy; }
+            float al=rr[3]/255.0f; if(al<=0.003f) continue;
+            int X=dx+i; if(X<0||X>=g_rtW) continue;
+            uint32_t* dpx=&g_rtBits[(size_t)Y*g_rtStride+X];
+            int dr=(*dpx>>16)&255,dg=(*dpx>>8)&255,db=*dpx&255,da=(*dpx>>24)&255;
+            float dA=da/255.0f, oA=al+dA*(1-al); int nr,ng,nb,na;
+            if(oA<=0.001f){nr=ng=nb=na=0;} else {
+                nr=(int)((rr[0]*al+dr*dA*(1-al))/oA+0.5f); ng=(int)((rr[1]*al+dg*dA*(1-al))/oA+0.5f);
+                nb=(int)((rr[2]*al+db*dA*(1-al))/oA+0.5f); na=(int)(oA*255+0.5f); }
+            *dpx=((uint32_t)na<<24)|((uint32_t)nr<<16)|((uint32_t)ng<<8)|(uint32_t)nb;
+        }
+    }
+}
+// Gauge dimensions at the current UI scale (g_gaugeScale). The bar is a fixed TWO-segment gauge:
+// two tiles + a right divider cap, so these define the reserved HP-field width.
+static int GaugeSegWpx() { return (int)(g_gaugeTileW * g_gaugeScale + 0.5f); }
+static int GaugeCapWpx() { return (int)(g_gaugeCapW * g_gaugeScale + 0.5f); }
+static int GaugeHpx()    { return (int)(g_gaugeTileH * g_gaugeScale + 0.5f); }
+static int GaugeBarWpx() { return g_gaugeReady ? (2 * GaugeSegWpx() + GaugeCapWpx()) : 0; }
+
+static void DsPush(int x, int y, const char* text, int len, COLORREF fill, COLORREF outline, int rad) {
+    DsTextCmd c; c.x = x; c.y = y; c.px = g_dsCurPx; c.rad = rad; c.fill = fill; c.outline = outline;
+    c.text.assign(text, (size_t)(len > 0 ? len : 0));
+    g_dsCmds.push_back(std::move(c));
+}
 
 static void SafeLstrcpynA(char* dst, const char* src, int count)
 {
@@ -266,6 +425,7 @@ struct OverlayRow
     int hpCurrentOffset = -1;
     int hpMaxOffset = -1;
     ULONGLONG hpOneUntilTick = 0;
+    int oneHpRank = 0;                // 1HP race highlight: 0 none, 1 first (dark red), 2 second (bright green)
     int hpGhost = -1;                 // pre-damage HP level for the lingering yellow chip
     ULONGLONG hpGhostUntilTick = 0;   // when the yellow chip stops showing
     uintptr_t connection = 0;
@@ -290,6 +450,57 @@ static bool g_rowsLockReady = false;
 static std::vector<OverlayRow> g_rows;
 static std::vector<WorldActorRow> g_worldRows;
 static std::unordered_map<uintptr_t, ULONGLONG> g_oneHpUntilByChr;
+// "Close game" 1HP race highlight. The first actor to reach 1HP opens a 1.5s window and is tagged
+// rank 1 (dark red). Any DIFFERENT actor that reaches 1HP while that window is still open is tagged
+// rank 2 (bright green). Lets you eyeball who bottomed out first in a near-simultaneous finish. A
+// rank persists as long as that actor's 1HP marker is live; the window is judged from the first hit.
+struct OneHpRank { int rank; ULONGLONG untilTick; };
+static std::unordered_map<uintptr_t, OneHpRank> g_oneHpRankByChr;
+static const DWORD ONE_HP_RACE_WINDOW_MS = 1500;
+static ULONGLONG g_oneHpWindowStartTick = 0;
+static uintptr_t g_oneHpWindowFirstChr = 0;
+
+// Caller must hold g_rowsLock. Start a 1HP flash for this actor, LATCHED: the first hit assigns the
+// colour (rank 1 = red for first to the floor in a fresh window, rank 2 = green for a second actor
+// within 1.5s) and a fixed 1.5s lifetime. While that flash is live, further hits are a no-op -- the
+// colour and end tick never change until it expires. Returns the flash's end tick. This is the single
+// place the 1HP marker is created; every trigger (HP-write hook, roster rebuild, HP poll) routes here
+// so the flash stays a solid 1.5s from the first hit and can never be re-extended or recoloured.
+static ULONGLONG StartOneHpFlash(uintptr_t chr, ULONGLONG now)
+{
+    std::unordered_map<uintptr_t, OneHpRank>::iterator it = g_oneHpRankByChr.find(chr);
+    if (it != g_oneHpRankByChr.end() && it->second.untilTick > now)
+        return it->second.untilTick;   // active flash -> latched, leave colour and end tick untouched
+
+    int rank;
+    if (g_oneHpWindowStartTick == 0 || g_oneHpWindowFirstChr == 0 ||
+        now - g_oneHpWindowStartTick > ONE_HP_RACE_WINDOW_MS)
+    {
+        g_oneHpWindowStartTick = now;      // fresh window -> this actor is first to the floor
+        g_oneHpWindowFirstChr = chr;
+        rank = 1;
+    }
+    else if (chr == g_oneHpWindowFirstChr)
+        rank = 1;                          // same actor re-entering inside its own window stays first
+    else
+        rank = 2;                          // a different actor within 1.5s -> second
+
+    ULONGLONG endTick = now + ONE_HP_RACE_WINDOW_MS;   // solid, fixed 1.5s flash
+    OneHpRank r; r.rank = rank; r.untilTick = endTick;
+    g_oneHpRankByChr[chr] = r;
+    g_oneHpUntilByChr[chr] = endTick;
+    return endTick;
+}
+
+// Caller must hold g_rowsLock. Current live race rank for an actor, or 0 if none/expired.
+static int OneHpRaceRank(uintptr_t chr, ULONGLONG now)
+{
+    std::unordered_map<uintptr_t, OneHpRank>::iterator it = g_oneHpRankByChr.find(chr);
+    if (it != g_oneHpRankByChr.end() && it->second.untilTick > now)
+        return it->second.rank;
+    return 0;
+}
+
 struct DmgGhost { int ghostHp; ULONGLONG untilTick; };
 static std::unordered_map<uintptr_t, DmgGhost> g_dmgGhostByChr;  // per-actor lingering damage chip
 static std::unordered_map<uint64_t, std::string> g_nameCacheBySteamId;
@@ -376,6 +587,13 @@ static bool g_showHp = true;
 // ShowHp=0 only removes the HP column from the drawn overlay.
 static bool g_showHpField = true;     // [Overlay] ShowHp
 static bool g_hpBars = false;         // [Overlay] HpBars -- draw HP as a filled bar, not a number
+// [Overlay] HpBarStyle -- sub-style used when HpBars=1:
+//   0 minimal  : plain bar (the original behaviour).
+//   1 damage   : the amount just lost is printed inside the bar (left, or right once HP < half).
+//   2 detailed : current HP is printed inside the bar (left, or right once HP < half), and the
+//                amount just lost is printed in bar-yellow beside the player's name.
+enum { HPBAR_MINIMAL = 0, HPBAR_DAMAGE = 1, HPBAR_DETAILED = 2 };
+static int g_hpBarStyle = HPBAR_MINIMAL;
 static bool g_showName = true;        // [Overlay] ShowName
 static bool g_showLocalMarker = true; // [Overlay] ShowLocalMarker
 static bool g_showDisconnected = true;// [Overlay] ShowDisconnected: keep a "Disconnected" row
@@ -393,6 +611,15 @@ static int g_toggleKey = VK_F3;
 // Optional modifier that must be held with the toggle key (0 = none). [Overlay] ToggleModifier.
 // Defaults to Shift so the bind is Shift+F3, which avoids DSFix's hotkeys.
 static int g_toggleModifier = VK_SHIFT;
+
+// Live settings quick-panel. Opened with the settings bind (default Shift+F4); while open,
+// the modifier + Up/Down move the highlighted row and modifier + Enter/Left/Right toggle it,
+// writing the change to the INI and applying it in-frame. Only display options that take
+// effect purely by flipping a global live here -- launch-time config stays in the launcher.
+static volatile bool g_settingsOpen = false;   // panel mode active
+static volatile int  g_settingsCursor = 0;     // highlighted row
+static int g_settingsKey = VK_F4;              // [Overlay] SettingsKey (default 0x73)
+static int g_settingsModifier = VK_SHIFT;      // [Overlay] SettingsModifier (default 0x10)
 static bool g_hpAutoScan = false;
 static int g_hpPollMs = 1;
 static bool g_hpDetectInstantRefill = true;
@@ -400,7 +627,7 @@ static int g_hpInstantRefillMinGain = 100;
 static int g_hpCurrentOffset = DEFAULT_HP_CURRENT_OFFSET;
 static int g_hpMaxOffset = DEFAULT_HP_MAX_OFFSET;
 static DWORD g_hpOneLingerMs = 500;
-static DWORD g_hpDmgLingerMs = 1000;  // [HP] DamageLingerMs -- how long the yellow damage chip lingers
+static DWORD g_hpDmgLingerMs = 1500;  // [HP] DamageLingerMs -- how long the yellow damage chip lingers
 static DWORD g_identityTtlMs = 120000;
 
 // ------------------------------------------------------------
@@ -724,6 +951,23 @@ static std::string SafeReadWideString(uintptr_t address, int maxChars)
     if (!SafeReadBytes(address, wbuffer, maxChars * sizeof(wchar_t)))
         return std::string();
 
+    // DSFont path: keep the full Unicode name as UTF-8 (DSFont renders it directly). The GDI
+    // fallback below can't draw non-ASCII, so it stays ASCII-only.
+    if (g_useDsFont)
+    {
+        int wl = 0;
+        while (wl < maxChars && wbuffer[wl] != 0 && wbuffer[wl] >= 0x20)
+            wl++;
+        if (wl == 0)
+            return std::string();
+        char u8[512];
+        int n = WideCharToMultiByte(CP_UTF8, 0, wbuffer, wl, u8, (int)sizeof(u8) - 1, NULL, NULL);
+        if (n <= 0)
+            return std::string();
+        u8[n] = 0;
+        return std::string(u8, (size_t)n);
+    }
+
     char out[256];
     ZeroMemory(out, sizeof(out));
 
@@ -961,6 +1205,24 @@ static void ApplyCornerString(const char* corner)
 
 static void LoadConfig(bool logIt)
 {
+    // SoFresh one-time defaults migration. Anyone UPDATING from an older ini (via the launcher OR the
+    // in-game auto-updater) gets the new recommended defaults written ONCE -- Classic Font, Health-Bar
+    // (damage) HP display, bottom-right corner, Y padding 97, logging off -- then a marker is stamped so
+    // their own later changes are never clobbered. Fresh installs carry these (and the marker) from the
+    // launcher's seed, so this only fires on an upgrade. Runs before any key is read below.
+    if (GetFileAttributesA(g_iniPath) != INVALID_FILE_ATTRIBUTES &&
+        GetPrivateProfileIntA("Migration", "SoFreshDefaults", 0, g_iniPath) == 0)
+    {
+        WritePrivateProfileStringA("Overlay",  "UseDsFont",      "1",            g_iniPath);
+        WritePrivateProfileStringA("Overlay",  "HpBars",         "1",            g_iniPath);
+        WritePrivateProfileStringA("Overlay",  "HpBarStyle",     "1",            g_iniPath);
+        WritePrivateProfileStringA("Overlay",  "Corner",         "bottom_right", g_iniPath);
+        WritePrivateProfileStringA("Overlay",  "PaddingY",       "97",           g_iniPath);
+        WritePrivateProfileStringA("Settings", "EnableLogging",  "0",            g_iniPath);
+        WritePrivateProfileStringA("Debug",    "MenuDetectLog",  "0",            g_iniPath);
+        WritePrivateProfileStringA("Migration","SoFreshDefaults","1",            g_iniPath);
+    }
+
     LoadLoggingSetting();
     logIt = logIt && g_loggingEnabled;
 
@@ -1036,6 +1298,36 @@ static void LoadConfig(bool logIt)
     if (g_lineHeight > 96)
         g_lineHeight = 96;
 
+    // Exact DS bitmap font for the overlay (Unicode Steam-name coverage). Off by default; the
+    // launcher bakes mctde_dsfont.bin next to this DLL (or in the chainload folder) on first run.
+    g_useDsFont = GetPrivateProfileIntA("Overlay", "UseDsFont", 0, g_iniPath) != 0;
+    g_dsFontPercent = GetPrivateProfileIntA("Overlay", "DsFontPercent", 100, g_iniPath);
+    if (g_dsFontPercent < 40)  g_dsFontPercent = 40;
+    if (g_dsFontPercent > 300) g_dsFontPercent = 300;
+
+    g_hpBarScalePct = GetPrivateProfileIntA("Overlay", "HpBarScale", 135, g_iniPath);
+    if (g_hpBarScalePct < 40)  g_hpBarScalePct = 40;
+    if (g_hpBarScalePct > 400) g_hpBarScalePct = 400;
+    g_dsFontSmooth = GetPrivateProfileIntA("Overlay", "DsFontSmooth", 1, g_iniPath);
+    if (g_useDsFont && !DSFont_Ready() && !g_dsFontTried)
+    {
+        g_dsFontTried = true;
+        wchar_t dir[MAX_PATH] = { 0 };
+        GetModuleFileNameW(g_hInstance, dir, MAX_PATH);
+        wchar_t* sl = wcsrchr(dir, L'\\');
+        std::wstring base = sl ? std::wstring(dir, sl - dir + 1) : std::wstring();
+        if (!DSFont_Load((base + L"mctde_dsfont.bin").c_str()))
+            DSFont_Load((base + L"mctde-Link_Chainload\\mctde_dsfont.bin").c_str());
+        LoadIcons(base + L"mctde_dsicons.bin");
+        if (!g_iconsReady)
+            LoadIcons(base + L"mctde-Link_Chainload\\mctde_dsicons.bin");
+        LoadGauge(base + L"mctde_dsgauge.bin");
+        if (!g_gaugeReady)
+            LoadGauge(base + L"mctde-Link_Chainload\\mctde_dsgauge.bin");
+    }
+    // (DS-font size in Classic mode is set per-frame from the render resolution in the D3D
+    // rasterizer, so it matches the in-game menu font -- see RenderOverlayToDIBAndSubmit.)
+
     // Tighten/loosen the horizontal space between HP, ping marker, and name.
     // Lower = more compact. v79 used 44, which made both sides of the gutter too wide.
     g_markerGutterExtra = GetPrivateProfileIntA("Overlay", "MarkerGutterExtra", 24, g_iniPath);
@@ -1055,6 +1347,9 @@ static void LoadConfig(bool logIt)
     g_showName = GetPrivateProfileIntA("Overlay", "ShowName", 1, g_iniPath) != 0;
     g_showHpField = GetPrivateProfileIntA("Overlay", "ShowHp", 1, g_iniPath) != 0;
     g_hpBars = GetPrivateProfileIntA("Overlay", "HpBars", 0, g_iniPath) != 0;
+    g_hpBarStyle = GetPrivateProfileIntA("Overlay", "HpBarStyle", HPBAR_MINIMAL, g_iniPath);
+    if (g_hpBarStyle < HPBAR_MINIMAL || g_hpBarStyle > HPBAR_DETAILED)
+        g_hpBarStyle = HPBAR_MINIMAL;
     g_showLocalMarker = GetPrivateProfileIntA("Overlay", "ShowLocalMarker", 1, g_iniPath) != 0;
     g_showDisconnected = GetPrivateProfileIntA("Overlay", "ShowDisconnected", 1, g_iniPath) != 0;
 
@@ -1103,6 +1398,27 @@ static void LoadConfig(bool logIt)
         g_toggleModifier = mod;
     }
 
+    // Live settings quick-panel hotkey. Same format as ToggleKey (decimal or hex vk).
+    {
+        char settingsKey[32];
+        ZeroMemory(settingsKey, sizeof(settingsKey));
+        GetPrivateProfileStringA("Overlay", "SettingsKey", "0x73", settingsKey, sizeof(settingsKey), g_iniPath);
+        TrimString(settingsKey);
+        int vk = (int)strtol(settingsKey, NULL, 0);
+        if (vk <= 0 || vk > 255)
+            vk = VK_F4;
+        g_settingsKey = vk;
+
+        char settingsMod[32];
+        ZeroMemory(settingsMod, sizeof(settingsMod));
+        GetPrivateProfileStringA("Overlay", "SettingsModifier", "0x10", settingsMod, sizeof(settingsMod), g_iniPath);
+        TrimString(settingsMod);
+        int mod = (int)strtol(settingsMod, NULL, 0);
+        if (mod < 0 || mod > 255)
+            mod = 0;
+        g_settingsModifier = mod;
+    }
+
     // HP is read from the live WORLD actor rows and updated by a separate 60 Hz thread.
     // Defaults are 0x3E8/0x3EC. Override these in decimal if testing shows a different offset.
     g_showHp = GetPrivateProfileIntA("HP", "Enabled", 1, g_iniPath) != 0;
@@ -1115,7 +1431,20 @@ static void LoadConfig(bool logIt)
     g_hpMaxOffset = GetPrivateProfileIntA("HP", "MaxOffset", DEFAULT_HP_MAX_OFFSET, g_iniPath);
     g_hpAutoScan = GetPrivateProfileIntA("HP", "AutoScan", 0, g_iniPath) != 0;
     g_hpOneLingerMs = (DWORD)GetPrivateProfileIntA("HP", "OneHpLingerMs", 500, g_iniPath);
-    g_hpDmgLingerMs = (DWORD)GetPrivateProfileIntA("HP", "DamageLingerMs", 1000, g_iniPath);
+    // ini self-migration: the shipped DamageLingerMs default rose from 1000 -> 1500. An ini written
+    // by an older build carries an explicit "DamageLingerMs=1000", which would otherwise pin the old
+    // feel forever. Rewrite ONLY that exact old-default value (a customized number is left alone, and
+    // an absent key already reads the 1500 code default below, so we never seed a missing key/file).
+    if (GetFileAttributesA(g_iniPath) != INVALID_FILE_ATTRIBUTES)
+    {
+        char dmgLinger[32];
+        ZeroMemory(dmgLinger, sizeof(dmgLinger));
+        GetPrivateProfileStringA("HP", "DamageLingerMs", "", dmgLinger, sizeof(dmgLinger), g_iniPath);
+        TrimString(dmgLinger);
+        if (strcmp(dmgLinger, "1000") == 0)
+            WritePrivateProfileStringA("HP", "DamageLingerMs", "1500", g_iniPath);
+    }
+    g_hpDmgLingerMs = (DWORD)GetPrivateProfileIntA("HP", "DamageLingerMs", 1500, g_iniPath);
     if (g_hpOneLingerMs > 5000)
         g_hpOneLingerMs = 5000;
 
@@ -2944,7 +3273,7 @@ static std::vector<OverlayRow> BuildOverlayRows(
         row.hpMax = w.hpMax;
         row.hpCurrentOffset = w.hpCurrentOffset;
         row.hpMaxOffset = w.hpMaxOffset;
-        row.hpOneUntilTick = (w.hasHp && w.hp == 1) ? (now + g_hpOneLingerMs) : 0;
+        row.hpOneUntilTick = 0;   // set below from the latched 1HP-flash map (g_oneHpUntilByChr), never re-derived here
         row.connection = 0;
         row.learnedAgeMs = hasIdentity ? (now - id.lastSeenTick) : 0;
         row.stickyRoute = STICKY_ROUTE_NONE;
@@ -3891,6 +4220,23 @@ static void StabilizeRowsWithPrevious(std::vector<OverlayRow>& rows, const std::
         if (old->hpOneUntilTick > row.hpOneUntilTick)
             row.hpOneUntilTick = old->hpOneUntilTick;
 
+        // Latch the 1HP race rank across rebuilds. The rank is decided ONCE, at the first 1HP hit
+        // (NoteOneHpForRace, held in g_oneHpRankByChr) and seeded onto the live rows by the HP-write
+        // hook -- but the per-poll rebuild derives hpOneUntilTick from hp==1 while leaving oneHpRank 0.
+        // Without carrying it, the first-place actor's rank resets to 0 every ~33ms and OneHpMarkerColor
+        // (rank 0 == bright green) flashes green over its dark-red marker -- even after the second actor
+        // has already gone green. Keep the old row's rank while its 1HP marker is still live.
+        if (row.oneHpRank == 0 && old->oneHpRank != 0 && row.hpOneUntilTick != 0)
+            row.oneHpRank = old->oneHpRank;
+
+        // Carry the damage-chip ghost across row rebuilds. Without this, each roster re-derive
+        // resets it to none and the yellow chunk / damage number blink off until the next HP poll.
+        if (old->hpGhostUntilTick > row.hpGhostUntilTick)
+        {
+            row.hpGhost = old->hpGhost;
+            row.hpGhostUntilTick = old->hpGhostUntilTick;
+        }
+
         if (!row.hasPing || (old->hasTruePing && !row.hasTruePing))
         {
             row.hasPing = old->hasPing;
@@ -4254,12 +4600,15 @@ extern "C" __declspec(noinline) void __cdecl OnHpWriteHook(uintptr_t chr, int wr
     if (hpMax < 1 || hpMax > 99999)
         return;
 
-    ULONGLONG until = GetTickCount64() + g_hpOneLingerMs;
-
     if (g_rowsLockReady)
     {
         EnterCriticalSection(&g_rowsLock);
-        g_oneHpUntilByChr[chr] = until;
+        // Real-time detection: this fires the instant the game writes 1 to an actor's HP, so it is the
+        // most accurate source for who reached 1HP first in a close finish. StartOneHpFlash latches the
+        // colour + a fixed 1.5s window; repeated writes while the flash is live change nothing.
+        ULONGLONG now = GetTickCount64();
+        ULONGLONG until = StartOneHpFlash(chr, now);
+        int rank = OneHpRaceRank(chr, now);
 
         for (size_t i = 0; i < g_rows.size(); i++)
         {
@@ -4268,6 +4617,7 @@ extern "C" __declspec(noinline) void __cdecl OnHpWriteHook(uintptr_t chr, int wr
                 g_rows[i].hpOneUntilTick = until;
                 g_rows[i].hasHp = true;
                 g_rows[i].hp = 1;
+                g_rows[i].oneHpRank = rank;
                 if (g_rows[i].hpMax < 1)
                     g_rows[i].hpMax = hpMax;
             }
@@ -4899,6 +5249,12 @@ static void UpdateOverlayPosition()
 
 static void DrawTextShadow(HDC hdc, int x, int y, COLORREF color, const char* text)
 {
+    if (DsDraw())
+    {
+        // Borderless in DS mode (shadow dropped); this helper is never the steam name.
+        DsPush(x, y, text, lstrlenA(text), color, 0, 0);
+        return;
+    }
     SetTextColor(hdc, RGB(1, 1, 1));
     TextOutA(hdc, x + 1, y + 1, text, lstrlenA(text));
 
@@ -4909,6 +5265,12 @@ static void DrawTextShadow(HDC hdc, int x, int y, COLORREF color, const char* te
 static void DrawTextOutlineThick(HDC hdc, int x, int y, COLORREF outline, COLORREF fill, const char* text)
 {
     const int len = lstrlenA(text);
+
+    if (DsDraw())
+    {
+        DsPush(x, y, text, len, fill, g_dsNameCtx ? outline : 0, g_dsNameCtx ? 2 : 0);
+        return;
+    }
 
     // Thicker readable border for host and non-invader phantoms.
     // Two-pixel full outline: cardinal + diagonal offsets at radius 1 and 2.
@@ -4935,6 +5297,12 @@ static void DrawTextOutlineThick(HDC hdc, int x, int y, COLORREF outline, COLORR
 static void DrawTextOutlineInvaderBlackWhite(HDC hdc, int x, int y, COLORREF outline, COLORREF fill, const char* text)
 {
     const int len = lstrlenA(text);
+
+    if (DsDraw())
+    {
+        DsPush(x, y, text, len, fill, g_dsNameCtx ? outline : 0, g_dsNameCtx ? 3 : 0);
+        return;
+    }
 
     // Invader: maximum visibility; solid black fill with thick red border.
     // The overlay transparent key is bright magenta, so pure black is safe.
@@ -4967,6 +5335,13 @@ static void DrawTextOutlineHpOneBold(HDC hdc, int x, int y, const char* text)
 {
     const int len = lstrlenA(text);
 
+    if (DsDraw())
+    {
+        // Borderless: draw the green itself as the fill so it stays visible without the outline.
+        DsPush(x, y, text, len, RGB(40, 255, 80), 0, 0);
+        return;
+    }
+
     // Competition marker: 1 HP rows become bold near-black with green border.
     // v36 uses a bright magenta overlay colorkey, so pure RGB(0,0,0) is safe and opaque.
     SetTextColor(hdc, RGB(40, 255, 80));
@@ -4986,6 +5361,40 @@ static void DrawTextOutlineHpOneBold(HDC hdc, int x, int y, const char* text)
     TextOutA(hdc, x + 1, y + 1, text, len);
 }
 
+// Colour for the live 1HP marker, chosen by the actor's race rank: dark red for the first to hit
+// 1HP in a window, bright green for the second. Rank 0 (uncontested / not yet ranked) keeps the
+// original bright-green marker so single-player 1HP still flashes green.
+static COLORREF OneHpMarkerColor(const OverlayRow& row)
+{
+    if (row.oneHpRank == 1) return RGB(170, 20, 20);   // first to 1HP in the window: dark red
+    return RGB(40, 255, 80);                            // second within 1.5s / uncontested: bright green
+}
+
+// Classic Font mode: the covenant/role icon index for a row (0..7), or -1 for none. Mirrors the
+// same route classification DrawOverlayName uses for colours. 0 White,1 Red summon,2 Red invader,
+// 3 Darkmoon,4 Gravelord,5 Forest hunter,6 Sunlight,7 Dragon.
+static int IconIndexForRow(const OverlayRow& row)
+{
+    if (row.disconnected) return -1;
+    if (IsSunlightSummonWorldRow(row)) return 6;
+    if (LiveChrTeamStyleKindForRow(row) == STICKY_ROUTE_HOST_LIVE_TYPE)
+    {
+        // Host appearance: chrType 8 = hollow, chrType 0 = human (see IsRecognizedLiveChrTeam).
+        if (g_iconsReady && ICON_LOCAL_MARKER < g_iconCount)
+            return (row.chrType == 8) ? ICON_HOST_HOLLOW : ICON_HOST_HUMAN;
+        return -1;
+    }
+    if (IsWhiteSummonWorldRow(row)) return 0;
+    if (IsDragonSummonWorldRow(row)) return 7;
+    if (IsForestHunterWorldRow(row)) return 5;
+    if (IsGravelordBlueWorldRow(row)) return 4;
+    if (IsDarkmoonBlueWorldRow(row)) return 3;
+    if (IsGenericBlueAppearanceWorldRow(row)) return 3;
+    if (IsRedSummonWorldRow(row)) return 1;
+    if (IsInvaderWorldRow(row)) return 2;
+    return -1;   // host / unclassified phantom -> no icon
+}
+
 static void DrawOverlayName(HDC hdc, int x, int y, const OverlayRow& row, const char* text)
 {
     if (row.disconnected)
@@ -4994,6 +5403,9 @@ static void DrawOverlayName(HDC hdc, int x, int y, const OverlayRow& row, const 
         DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), RGB(150, 150, 150), text);
         return;
     }
+
+    // The 1HP race NEVER tints text -- only the HP bar changes colour (see DrawOverlayHpBar). Names,
+    // ping/markers and HP numbers keep their normal role colours throughout a 1HP flash.
 
     if (LiveChrTeamStyleKindForRow(row) == STICKY_ROUTE_HOST_LIVE_TYPE)
     {
@@ -5082,21 +5494,92 @@ static void DrawOverlayName(HDC hdc, int x, int y, const OverlayRow& row, const 
 
 static void DrawOverlayHp(HDC hdc, int x, int y, const OverlayRow& row, const char* text)
 {
-    ULONGLONG now = GetTickCount64();
-    if (row.hpOneUntilTick != 0 && now <= row.hpOneUntilTick)
-    {
-        // 1HP marker: only the HP field turns green. MS/name keep their normal role styling.
-        DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), RGB(40, 255, 80), text);
-        return;
-    }
-
+    // The 1HP race never colours the HP number (or any text) -- only the HP bar. In number mode the
+    // HP just reads normally.
     DrawOverlayName(hdc, x, y, row, text);
+}
+
+// Print the just-lost damage inside an HP bar in bar-yellow (matching the yellow damage chunk),
+// with a black outline for legibility over both the green fill and the dark backing. Sits on the
+// left, but flips to the right once current HP drops below half so the digits stay clear of the
+// shrinking fill / lingering yellow chip.
+static void DrawHpBarInlineValue(HDC hdc, int x, int y, int w, int h, HFONT font,
+                                 int value, bool onRight)
+{
+    if (!font)
+        return;
+    char buf[16];
+    wsprintfA(buf, "%d", value);
+    HGDIOBJ oldF = SelectObject(hdc, font);
+    SIZE ts;
+    ZeroMemory(&ts, sizeof(ts));
+    GetTextExtentPoint32A(hdc, buf, lstrlenA(buf), &ts);
+    const int pad = 3;
+    int tx = onRight ? (x + w - ts.cx - pad) : (x + pad);
+    if (tx < x + pad) tx = x + pad;                 // never spill past the left edge on a narrow bar
+    int ty = y + (h - ts.cy) / 2;
+    DrawTextOutlineThick(hdc, tx, ty, RGB(0, 0, 0), RGB(255, 255, 255), buf);   // damage number = white
+    SelectObject(hdc, oldF);
+}
+
+// Detailed HP-bar style: the current HP value, drawn in white with a black outline beside the name.
+// It sits on the OUTER side of the name (away from the HP bar): to the left of the name when the
+// overlay is right-anchored (name is left-most), otherwise to the right.
+static void DrawNameHpNumber(HDC hdc, int nameX, int nameW, int y, HFONT font,
+                             const OverlayRow& row, bool hpLeftOfName, int gap)
+{
+    if (!font || row.hp < 0)
+        return;
+    char buf[16];
+    wsprintfA(buf, "%d", row.hp);
+    HGDIOBJ oldF = SelectObject(hdc, font);
+    SIZE ts;
+    ZeroMemory(&ts, sizeof(ts));
+    GetTextExtentPoint32A(hdc, buf, lstrlenA(buf), &ts);
+    int dx = hpLeftOfName ? (nameX - gap - ts.cx) : (nameX + nameW + gap);
+    if (dx < 0) dx = 0;
+    DrawTextOutlineThick(hdc, dx, y, RGB(0, 0, 0), RGB(255, 255, 255), buf);
+    SelectObject(hdc, oldF);
+}
+
+// Fill a rect with one of the game's actual gauge-fill gradients, sampled row-for-row from the fill
+// strips in menu/Menu08.dds and stretched to the bar height.
+static void FillGaugeGrad(HDC hdc, int x, int y, int w, int h, const int prof[12][3])
+{
+    if (w <= 0 || h <= 0) return;
+    for (int i = 0; i < h; i++)
+    {
+        double fp = (h > 1) ? (double)i / (h - 1) * 11.0 : 0.0;
+        int a = (int)fp; if (a > 10) a = 10; double u = fp - a;
+        int r = (int)(prof[a][0] + (prof[a+1][0] - prof[a][0]) * u + 0.5);
+        int g = (int)(prof[a][1] + (prof[a+1][1] - prof[a][1]) * u + 0.5);
+        int b = (int)(prof[a][2] + (prof[a+1][2] - prof[a][2]) * u + 0.5);
+        RECT rr = { x, y + i, x + w, y + i + 1 };
+        HBRUSH hb = CreateSolidBrush(RGB(r, g, b)); FillRect(hdc, &rr, hb); DeleteObject(hb);
+    }
+}
+// Red HP gradient (light dusty top -> deep maroon bottom).
+static void FillGaugeRed(HDC hdc, int x, int y, int w, int h)
+{
+    static const int PROF[12][3] = {
+        {123,93,90},{112,80,77},{101,66,63},{90,53,49},{74,36,41},{69,28,30},
+        {63,20,19},{58,12,8},{58,4,8},{60,3,5},{66,0,0},{66,0,0} };
+    FillGaugeGrad(hdc, x, y, w, h, PROF);
+}
+// Olive-gold gradient used for the recently-lost ("damage") chunk -- the 4th fill strip in Menu08.
+static void FillGaugeYellow(HDC hdc, int x, int y, int w, int h)
+{
+    static const int PROF[12][3] = {
+        {107,101,25},{99,93,25},{90,85,25},{82,77,25},{74,65,16},{66,59,14},
+        {58,54,11},{49,49,8},{58,53,8},{66,59,11},{74,66,14},{82,73,16} };
+    FillGaugeGrad(hdc, x, y, w, h, PROF);
 }
 
 // HP rendered as a Souls-style gauge: dark backing + a fill proportional to hp/hpMax, with a
 // 1px black outline. Colours shift green->amber->red as the bar empties; a live 1HP marker
 // flashes bright green. Drawn into the same color-keyed DIB, so it must avoid the magenta key.
-static void DrawOverlayHpBar(HDC hdc, int x, int y, int w, int h, const OverlayRow& row)
+// valueFont (may be null) is used to print the in-bar number for the damage/detailed styles.
+static void DrawOverlayHpBar(HDC hdc, int x, int y, int w, int h, const OverlayRow& row, HFONT valueFont)
 {
     if (row.hpMax <= 0 || w < 4 || h < 3)
         return;
@@ -5112,30 +5595,93 @@ static void DrawOverlayHpBar(HDC hdc, int x, int y, int w, int h, const OverlayR
         if (ghostFrac > 1.0) ghostFrac = 1.0;
     }
 
+    // Textured gauge: a fixed two-segment ruler scaled to sit 1:1 with the in-game HP bar (its width
+    // is what the HP field reserves). Backing + fills are GDI (color-keyed); the frame is deferred and
+    // alpha-composited after the key pass. Gated on the D3D target so the real gauge shows in any font
+    // mode; the GDI-window PaintOverlay path (g_rtBits null) uses the hand-drawn fallback below.
+    if (g_rtBits != nullptr && g_gaugeReady)
+    {
+        int segW = GaugeSegWpx(), capW = GaugeCapWpx();
+        int gaugeW = 2 * segW + capW;
+        int gaugeH = GaugeHpx();
+        int gy = y + (h - gaugeH) / 2;                       // centre in the row's HP slot
+
+        RECT bg = { x, gy, x + gaugeW, gy + gaugeH };         // empty backing: deep maroon
+        HBRUSH bgb = CreateSolidBrush(RGB(30, 8, 6)); FillRect(hdc, &bg, bgb); DeleteObject(bgb);
+
+        int fw = (int)(gaugeW * frac + 0.5);                 // current HP width
+        int gw = (int)(gaugeW * ghostFrac + 0.5);            // pre-damage width (top of the lost chunk)
+
+        // 1HP race flash: for the whole latched 1.5s the ENTIRE bar goes one solid colour -- dark red
+        // for the first actor to hit 1HP, bright green for a second within 1.5s -- overriding the normal
+        // gauge/damage-chip entirely. The colour was decided once at the first hit and never changes.
+        bool oneHpFlash = (row.hpOneUntilTick != 0 && now <= row.hpOneUntilTick);
+        if (oneHpFlash)
+        {
+            RECT fr = { x, gy, x + gaugeW, gy + gaugeH };
+            HBRUSH fb = CreateSolidBrush(OneHpMarkerColor(row)); FillRect(hdc, &fr, fb); DeleteObject(fb);
+        }
+        else
+        {
+            // Recently-lost chunk (olive-gold, Menu08 4th strip), then the red gauge gradient.
+            if (gw > fw) FillGaugeYellow(hdc, x + fw, gy, gw - fw, gaugeH);
+            if (fw > 0)  FillGaugeRed(hdc, x, gy, fw, gaugeH);
+        }
+
+        // Frame: two ruler tiles + a right divider cap, deferred as scaled real-alpha blits.
+        DsGaugeCmd t0 = { g_gaugeTile, g_gaugeTileW, g_gaugeTileH, x,            gy, segW, gaugeH };
+        DsGaugeCmd t1 = { g_gaugeTile, g_gaugeTileW, g_gaugeTileH, x + segW,     gy, segW, gaugeH };
+        DsGaugeCmd cc = { g_gaugeCap,  g_gaugeCapW,  g_gaugeCapH,  x + 2 * segW, gy, capW, gaugeH };
+        g_dsGaugeCmds.push_back(t0); g_dsGaugeCmds.push_back(t1); g_dsGaugeCmds.push_back(cc);
+
+        if ((g_hpBarStyle == HPBAR_DAMAGE || g_hpBarStyle == HPBAR_DETAILED) &&
+            row.hpGhost > row.hp && row.hpGhostUntilTick > now)
+        {
+            bool onRight = (row.hp * 2 < row.hpMax);
+            DrawHpBarInlineValue(hdc, x, gy, gaugeW, gaugeH, valueFont, row.hpGhost - row.hp, onRight);
+        }
+        return;
+    }
+
+    // ---- GDI fallback (PaintOverlay window / gauge texture unavailable): hand-drawn 2-segment ruler.
     RECT bg = { x, y, x + w, y + h };
-    HBRUSH bgb = CreateSolidBrush(RGB(58, 16, 16));      // empty backing
-    FillRect(hdc, &bg, bgb);
-    DeleteObject(bgb);
+    HBRUSH bgb = CreateSolidBrush(RGB(30, 8, 6)); FillRect(hdc, &bg, bgb); DeleteObject(bgb);
 
-    int fw = (int)(w * frac + 0.5);                      // current HP width (green)
-    int gw = (int)(w * ghostFrac + 0.5);                 // pre-damage width (top of yellow)
-
-    COLORREF fillCol = RGB(95, 175, 75);                 // current HP = green
+    int fw = (int)(w * frac + 0.5);
+    int gw = (int)(w * ghostFrac + 0.5);
     if (row.hpOneUntilTick != 0 && now <= row.hpOneUntilTick)
-        fillCol = RGB(40, 255, 80);                      // bright green while 1HP marker lingers
-
-    // Bar always fills from the left, so HP depletes toward the right (the corner side when
-    // the bar is right-anchored).
-    if (gw > fw) { RECT yr = { x + fw, y, x + gw, y + h }; HBRUSH yb = CreateSolidBrush(RGB(230, 205, 55)); FillRect(hdc, &yr, yb); DeleteObject(yb); }
-    if (fw > 0)  { RECT fr = { x, y, x + fw, y + h };      HBRUSH fb = CreateSolidBrush(fillCol);          FillRect(hdc, &fr, fb); DeleteObject(fb); }
-
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
-    HGDIOBJ op = SelectObject(hdc, pen);
-    HGDIOBJ ob = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-    Rectangle(hdc, x, y, x + w, y + h);
-    SelectObject(hdc, op);
-    SelectObject(hdc, ob);
-    DeleteObject(pen);
+    {
+        // Solid full-bar 1HP flash (see textured path).
+        RECT fr = { x, y, x + w, y + h };
+        HBRUSH fb = CreateSolidBrush(OneHpMarkerColor(row)); FillRect(hdc, &fr, fb); DeleteObject(fb);
+    }
+    else
+    {
+        if (gw > fw) FillGaugeYellow(hdc, x + fw, y, gw - fw, h);
+        if (fw > 0)  FillGaugeRed(hdc, x, y, fw, h);
+    }
+    {
+        HPEN blk = CreatePen(PS_SOLID, 1, RGB(0, 0, 0));
+        HGDIOBJ opn = SelectObject(hdc, blk);
+        MoveToEx(hdc, x, y, NULL);         LineTo(hdc, x + w, y);
+        MoveToEx(hdc, x, y + h - 1, NULL); LineTo(hdc, x + w, y + h - 1);
+        for (int s = 0; s <= 2; s++) { int mx = x + (int)(w * s / 2.0 + 0.5); if (mx > x + w - 1) mx = x + w - 1; MoveToEx(hdc, mx, y, NULL); LineTo(hdc, mx, y + h); }
+        int tickLen = max(2, h / 3);
+        for (int s = 0; s < 2; s++)
+        {
+            int sx = x + (int)(w * s / 2.0 + 0.5);
+            int segW = (int)(w / 2.0 + 0.5);
+            for (int k = 1; k <= 3; k++) { int tx = sx + (int)(segW * k / 4.0 + 0.5); MoveToEx(hdc, tx, y, NULL); LineTo(hdc, tx, y + tickLen); }
+        }
+        SelectObject(hdc, opn);
+        DeleteObject(blk);
+    }
+    if ((g_hpBarStyle == HPBAR_DAMAGE || g_hpBarStyle == HPBAR_DETAILED) &&
+        row.hpGhost > row.hp && row.hpGhostUntilTick > now)
+    {
+        bool onRight = (row.hp * 2 < row.hpMax);
+        DrawHpBarInlineValue(hdc, x, y, w, h, valueFont, row.hpGhost - row.hp, onRight);
+    }
 }
 
 // Spacewar controller-setup instruction panel. The first line is the gold heading;
@@ -5186,6 +5732,77 @@ static int DrawControllerSetupPanel(HDC hdc, int x, int y)
         COLORREF fill = (i == 0) ? RGB(255, 220, 40)    // gold heading
                                  : RGB(245, 245, 245);  // white body
         DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), fill, kControllerSetupLines[i]);
+        y += lineHeight;
+    }
+    return y;
+}
+
+// ------------------------------------------------------------
+// Live settings quick-panel (Shift+F4). Each row toggles a display global in place; the
+// change takes effect on the next rasterized frame (no relaunch) and, where a section/key
+// is given, is persisted to the INI. Launch-only config (PhantomUnleashed, launcher
+// behavior) is intentionally NOT here -- it can't change safely mid-session.
+// ------------------------------------------------------------
+struct LiveSettingItem
+{
+    const char*    label;
+    volatile bool* var;      // display global toggled in place
+    const char*    section;  // INI section to persist to, or nullptr = transient (not saved)
+    const char*    key;
+};
+
+static LiveSettingItem kLiveSettings[] = {
+    { "Overlay rows",      &g_overlayVisible,      nullptr,   nullptr },              // transient; mirrors Shift+F3
+    { "Controller setup",  &g_showControllerSetup, "Overlay", "ShowControllerSetup" },
+    { "Show disconnected", &g_showDisconnected,    "Overlay", "ShowDisconnected" },
+    { "Show HP",           &g_showHpField,         "Overlay", "ShowHp" },
+    { "Show ping",         &g_showPing,            "Overlay", "ShowPing" },
+    { "Show local marker", &g_showLocalMarker,     "Overlay", "ShowLocalMarker" },
+};
+static const int kLiveSettingsCount = (int)(sizeof(kLiveSettings) / sizeof(kLiveSettings[0]));
+
+static const char* const kLiveSettingsHeading = "=[mctde Settings  (Shift+arrows)]=";
+
+// Caller must have the small font selected into hdc. Reports the panel's pixel size
+// (heading + one line per row). Rows are measured at their widest rendering.
+static void MeasureLiveSettingsPanel(HDC hdc, int* outW, int* outH)
+{
+    int maxW = 0;
+    SIZE s;
+    ZeroMemory(&s, sizeof(s));
+    GetTextExtentPoint32A(hdc, kLiveSettingsHeading, lstrlenA(kLiveSettingsHeading), &s);
+    maxW = s.cx;
+    for (int i = 0; i < kLiveSettingsCount; i++)
+    {
+        char line[96];
+        // "> label: off" is the widest form (cursor prefix + the longer "off" value).
+        wsprintfA(line, "> %s: off", kLiveSettings[i].label);
+        ZeroMemory(&s, sizeof(s));
+        GetTextExtentPoint32A(hdc, line, lstrlenA(line), &s);
+        if (s.cx > maxW)
+            maxW = s.cx;
+    }
+    if (outW) *outW = maxW;
+    if (outH) *outH = ControllerSetupLineHeight(hdc) * (kLiveSettingsCount + 1);
+}
+
+// Caller must have the small font selected into hdc. Returns the y just below the panel.
+static int DrawLiveSettingsPanel(HDC hdc, int x, int y)
+{
+    int lineHeight = ControllerSetupLineHeight(hdc);
+    DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), RGB(255, 220, 40), kLiveSettingsHeading);
+    y += lineHeight;
+
+    int cursor = g_settingsCursor;
+    for (int i = 0; i < kLiveSettingsCount; i++)
+    {
+        bool sel = (i == cursor);
+        char line[96];
+        wsprintfA(line, "%s %s: %s", sel ? ">" : " ",
+                  kLiveSettings[i].label, *kLiveSettings[i].var ? "ON" : "off");
+        COLORREF fill = sel ? RGB(120, 230, 120)      // highlighted row: green
+                            : RGB(235, 235, 235);     // idle: white
+        DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), fill, line);
         y += lineHeight;
     }
     return y;
@@ -5405,7 +6022,20 @@ static void PaintOverlay(HWND hwnd)
             widthEstimate = setupWidth + 8;
     }
 
-    if (totalLines < 1 && !drawSetup)
+    // Live settings quick-panel. Not gated by g_overlayVisible: opening it must show the
+    // panel even when the rows are hidden (so you can toggle them back on from here).
+    bool drawSettings = g_settingsOpen;
+    int settingsWidth = 0;
+    int settingsHeight = 0;
+    if (drawSettings)
+    {
+        SelectObject(hdc, smallFont);
+        MeasureLiveSettingsPanel(hdc, &settingsWidth, &settingsHeight);
+        if (settingsWidth + 8 > widthEstimate)
+            widthEstimate = settingsWidth + 8;
+    }
+
+    if (totalLines < 1 && !drawSetup && !drawSettings)
     {
         SelectObject(hdc, oldFont); // fonts are cached; do not delete
         if (hdc == backHdc)
@@ -5424,7 +6054,10 @@ static void PaintOverlay(HWND hwnd)
         return;
     }
 
-    int blockHeight = setupHeight + totalLines * lineHeight;
+    // Rows only occupy space when actually drawn (they're gated on g_overlayVisible below);
+    // don't reserve their height when hidden, so the panels anchor correctly on bottom corners.
+    int rowLines = g_overlayVisible ? totalLines : 0;
+    int blockHeight = settingsHeight + setupHeight + rowLines * lineHeight;
     int overlayWidth = rc.right - rc.left;
     int overlayHeight = rc.bottom - rc.top;
 
@@ -5443,7 +6076,15 @@ static void PaintOverlay(HWND hwnd)
     if (y < g_paddingY)
         y = g_paddingY;
 
-    // Draw the controller-setup panel first; rows fall in below it.
+    // Draw the live settings panel first (when open), then the controller-setup panel;
+    // rows fall in below both.
+    if (drawSettings)
+    {
+        SelectObject(hdc, smallFont);
+        y = DrawLiveSettingsPanel(hdc, x, y);
+    }
+
+    // Draw the controller-setup panel next; rows fall in below it.
     if (drawSetup)
     {
         SelectObject(hdc, smallFont);
@@ -5503,7 +6144,7 @@ static void PaintOverlay(HWND hwnd)
         {
             if (g_hpBars && row.hasHp && row.hpMax > 0 && !row.disconnected)
             {
-                DrawOverlayHpBar(hdc, x, hpY, hpFieldWidth - 6, hpTm.tmHeight, row);
+                DrawOverlayHpBar(hdc, x, hpY, hpFieldWidth - 6, hpTm.tmHeight, row, smallFont);
             }
             else
             {
@@ -5521,11 +6162,25 @@ static void PaintOverlay(HWND hwnd)
             ZeroMemory(&markerSize, sizeof(markerSize));
             GetTextExtentPoint32A(hdc, markerLine, lstrlenA(markerLine), &markerSize);
             int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
-            DrawOverlayName(hdc, markerX, smallY, row, markerLine);
+            // Ping/marker text is always neutral white (never role- or 1HP-coloured); disconnected grey.
+            COLORREF markerFill = row.disconnected ? RGB(150, 150, 150) : RGB(240, 240, 240);
+            DrawTextOutlineThick(hdc, markerX, smallY, RGB(0, 0, 0), markerFill, markerLine);
         }
 
         if (g_showName)
             DrawOverlayName(hdc, nameX, smallY, row, nameLine);
+
+        // Detailed style: the HP number sits past the name (the outer edge). This GDI path never
+        // mirrors the columns, so the name is always right-most -> HP to its right.
+        if (g_hpBars && g_hpBarStyle == HPBAR_DETAILED && g_showName && row.hasHp &&
+            row.hpMax > 0 && !row.disconnected)
+        {
+            SelectObject(hdc, smallFont);
+            SIZE nameSize;
+            ZeroMemory(&nameSize, sizeof(nameSize));
+            GetTextExtentPoint32A(hdc, nameLine, lstrlenA(nameLine), &nameSize);
+            DrawNameHpNumber(hdc, nameX, nameSize.cx, smallY, smallFont, row, false, smallTm.tmAveCharWidth);
+        }
 
         y += lineHeight;
     }
@@ -6427,21 +7082,28 @@ static DWORD WINAPI PollThread(LPVOID)
                     }
                 }
 
+                // Display-only: read the latched 1HP flash. The flash is STARTED elsewhere, edge-
+                // triggered on the transition to 1HP (the HP-write hook and the HP poll) -- never here,
+                // so a player sitting at 1HP flashes once for a fixed 1.5s then reverts to a normal bar
+                // instead of re-flashing every window. Take the end tick as-is while it is live.
                 std::unordered_map<uintptr_t, ULONGLONG>::iterator forcedOne = g_oneHpUntilByChr.find(newRow.chr);
-                if (forcedOne != g_oneHpUntilByChr.end() && forcedOne->second > newRow.hpOneUntilTick)
+                if (forcedOne != g_oneHpUntilByChr.end() && forcedOne->second > now)
                     newRow.hpOneUntilTick = forcedOne->second;
-
-                if (newRow.hasHp && newRow.hp == 1)
-                {
-                    newRow.hpOneUntilTick = now + g_hpOneLingerMs;
-                    g_oneHpUntilByChr[newRow.chr] = newRow.hpOneUntilTick;
-                }
+                newRow.oneHpRank = OneHpRaceRank(newRow.chr, now);
             }
 
             for (std::unordered_map<uintptr_t, ULONGLONG>::iterator it = g_oneHpUntilByChr.begin(); it != g_oneHpUntilByChr.end(); )
             {
                 if (it->second + 5000 < now)
                     it = g_oneHpUntilByChr.erase(it);
+                else
+                    ++it;
+            }
+
+            for (std::unordered_map<uintptr_t, OneHpRank>::iterator it = g_oneHpRankByChr.begin(); it != g_oneHpRankByChr.end(); )
+            {
+                if (it->second.untilTick + 5000 < now)
+                    it = g_oneHpRankByChr.erase(it);
                 else
                     ++it;
             }
@@ -6506,7 +7168,9 @@ static DWORD WINAPI HpPollThread(LPVOID)
 
                     if (row.hasHp)
                     {
-                        bool literalOneHp = (row.hp == 1);
+                        // Edge-triggered: fire only on the TRANSITION to 1HP (not every frame the actor
+                        // sits at 1), so the flash is a single fixed 1.5s that then reverts to normal.
+                        bool oneHpEdge = (oldHadHp && oldHp != 1 && row.hp == 1);
 
                         bool instantRefillHit = false;
                         if (g_hpDetectInstantRefill && oldHadHp && oldHp > 1 && row.hp > oldHp)
@@ -6519,10 +7183,10 @@ static DWORD WINAPI HpPollThread(LPVOID)
                                 instantRefillHit = true;
                         }
 
-                        if (literalOneHp || instantRefillHit)
+                        if (oneHpEdge || instantRefillHit)
                         {
-                            row.hpOneUntilTick = now + g_hpOneLingerMs;
-                            g_oneHpUntilByChr[row.chr] = row.hpOneUntilTick;
+                            row.hpOneUntilTick = StartOneHpFlash(row.chr, now);   // latched fixed 1.5s
+                            row.oneHpRank = OneHpRaceRank(row.chr, now);
                         }
                     }
 
@@ -6579,8 +7243,9 @@ static DWORD WINAPI HpPollThread(LPVOID)
 // ------------------------------------------------------------
 static void RenderOverlayToDIBAndSubmit()
 {
-    // Master hotkey toggle: submit an empty bitmap so the in-frame overlay clears.
-    if (!g_overlayVisible)
+    // Master hotkey toggle: submit an empty bitmap so the in-frame overlay clears. The live
+    // settings panel is exempt -- it must stay visible even with the rows toggled off.
+    if (!g_overlayVisible && !g_settingsOpen)
     {
         D3DOverlay_Submit(NULL, 0, 0, (int)g_corner, g_paddingX, g_paddingY);
         return;
@@ -6594,6 +7259,11 @@ static void RenderOverlayToDIBAndSubmit()
         LeaveCriticalSection(&g_rowsLock);
     }
 
+    // Rows hidden by the master toggle: drop them so only the settings panel (which got us
+    // past the early-out above) rasterizes. Setup panel is also gated on g_overlayVisible.
+    if (!g_overlayVisible)
+        rows.clear();
+
     {
         static int s_lastRowCount = -1;
         if ((int)rows.size() != s_lastRowCount)
@@ -6604,13 +7274,44 @@ static void RenderOverlayToDIBAndSubmit()
     }
 
     // The controller-setup panel can render on its own at the main menu, where no
-    // player rows exist yet. g_overlayVisible was already checked above.
-    bool drawSetup = g_showControllerSetup;
+    // player rows exist yet. Gated on g_overlayVisible so Shift+F3 hides it too.
+    bool drawSetup = g_showControllerSetup && g_overlayVisible;
+    bool drawSettings = g_settingsOpen;
 
-    if (rows.empty() && !drawSetup)
+    if (rows.empty() && !drawSetup && !drawSettings)
     {
         D3DOverlay_Submit(NULL, 0, 0, (int)g_corner, g_paddingX, g_paddingY);
         return;
+    }
+
+    // Classic Font: match the in-game menu font size. DS1's UI is authored for 720p and scaled by
+    // the render resolution, so render the bitmap font at the same whole-number UI factor
+    // (renderH/720). Integer factor keeps it crisp; sizing tracks the game menu exactly.
+    if (g_useDsFont && DSFont_Ready())
+    {
+        int rh = D3DOverlay_RenderHeight();
+        int cell = DSFont_CellHeight();
+        float scale = ((rh > 0) ? (float)rh / (float)DS_UI_REF_H : 1.0f) * (g_dsFontPercent / 100.0f);
+        if (scale < 0.4f) scale = 0.4f;
+        if (scale > 8.0f) scale = 8.0f;
+        DSFont_SetScale(scale);                                // exact scale, no pixel rounding
+        DSFont_SetSmooth(g_dsFontSmooth != 0);                 // bilinear (game-like) vs hard point
+        int fh = (int)(scale * cell + 0.5f);                   // integer height for layout + icons
+        g_fontHeight   = fh;
+        g_hpFontHeight = fh;
+        g_lineHeight   = fh + fh / 8;
+    }
+
+    // Gauge scale: the in-game HP bar (like the whole HUD) is authored for the DS_UI_REF_H virtual
+    // screen and drawn scaled by the render resolution, so blit the gauge at the same factor to sit
+    // 1:1 with it. [Overlay] HpBarScale is an optional user multiplier (100 = exact HUD match). Set
+    // unconditionally (the gauge shows in any font mode) and before the HP-field width is computed.
+    {
+        int rhg = D3DOverlay_RenderHeight();
+        float gs = ((rhg > 0) ? (float)rhg / (float)DS_UI_REF_H : 1.0f) * (g_hpBarScalePct / 100.0f);
+        if (gs < 0.4f) gs = 0.4f;
+        if (gs > 8.0f) gs = 8.0f;
+        g_gaugeScale = gs;
     }
 
     HFONT smallFont = CreateFontA(
@@ -6637,15 +7338,16 @@ static void RenderOverlayToDIBAndSubmit()
     HFONT oldFont = (HFONT)SelectObject(hdc, hpFont);
     TEXTMETRICA hpTm; ZeroMemory(&hpTm, sizeof(hpTm));
     GetTextMetricsA(hdc, &hpTm);
+    if (g_useDsFont && DSFont_Ready()) { hpTm.tmHeight = g_hpFontHeight; hpTm.tmAveCharWidth = DSFont_MeasureUTF8("0", 1, g_hpFontHeight); }
     SIZE hpMaxSize; ZeroMemory(&hpMaxSize, sizeof(hpMaxSize));
-    GetTextExtentPoint32A(hdc, "9999HP", 6, &hpMaxSize);
+    MeasA(hdc, "9999HP", 6, g_hpFontHeight, &hpMaxSize);
     // Disconnected placeholder rows render "Disconnected" in the HP column; widen it to fit.
     for (size_t di = 0; di < rows.size(); di++)
     {
         if (rows[di].disconnected)
         {
             SIZE dcSize; ZeroMemory(&dcSize, sizeof(dcSize));
-            GetTextExtentPoint32A(hdc, "Disconnected", 12, &dcSize);
+            MeasA(hdc, "Disconnected", 12, g_hpFontHeight, &dcSize);
             if (dcSize.cx > hpMaxSize.cx) hpMaxSize.cx = dcSize.cx;
             break;
         }
@@ -6654,13 +7356,14 @@ static void RenderOverlayToDIBAndSubmit()
     SelectObject(hdc, smallFont);
     TEXTMETRICA smallTm; ZeroMemory(&smallTm, sizeof(smallTm));
     GetTextMetricsA(hdc, &smallTm);
+    if (g_useDsFont && DSFont_Ready()) { smallTm.tmHeight = g_fontHeight; smallTm.tmAveCharWidth = DSFont_MeasureUTF8("n", 1, g_fontHeight); }
     SIZE markerMaxSize; ZeroMemory(&markerMaxSize, sizeof(markerMaxSize));
     if (g_showPing)
-        GetTextExtentPoint32A(hdc, "999MS(C)", 8, &markerMaxSize);
+        MeasA(hdc, "999MS(C)", 8, g_fontHeight, &markerMaxSize);
     if (g_showLocalMarker)
     {
         SIZE localMarkerMaxSize; ZeroMemory(&localMarkerMaxSize, sizeof(localMarkerMaxSize));
-        GetTextExtentPoint32A(hdc, "\\[T]/", 5, &localMarkerMaxSize);
+        MeasA(hdc, "\\[T]/", 5, g_fontHeight, &localMarkerMaxSize);
         if (localMarkerMaxSize.cx > markerMaxSize.cx)
             markerMaxSize.cx = localMarkerMaxSize.cx;
     }
@@ -6673,7 +7376,12 @@ static void RenderOverlayToDIBAndSubmit()
     bool drawHpField = g_showHp && g_showHpField;
     // The marker gutter collapses to zero when neither marker can ever appear.
     bool anyMarker = g_showPing || g_showLocalMarker;
-    int hpFieldWidth = drawHpField ? ((g_hpBars ? hpMaxSize.cx * 2 : hpMaxSize.cx) + 6) : 0;
+    // With the textured gauge, the HP field reserves the fixed two-segment bar width (1:1 with the
+    // in-game bar); otherwise it sizes to the HP text (bar or number).
+    int hpFieldWidth;
+    if (!drawHpField)                        hpFieldWidth = 0;
+    else if (g_hpBars && g_gaugeReady)       hpFieldWidth = GaugeBarWpx() + 6;
+    else                                     hpFieldWidth = (g_hpBars ? hpMaxSize.cx * 2 : hpMaxSize.cx) + 6;
     int markerGutterWidth = anyMarker ? (markerMaxSize.cx + g_markerGutterExtra) : 0;
     int nameX = hpFieldWidth + markerGutterWidth;
     int totalLines = (int)rows.size();
@@ -6690,10 +7398,13 @@ static void RenderOverlayToDIBAndSubmit()
             if (len <= 0)
                 continue;
             SIZE ns; ZeroMemory(&ns, sizeof(ns));
-            GetTextExtentPoint32A(hdc, nm, len, &ns);
+            MeasA(hdc, nm, len, g_fontHeight, &ns);
             if (ns.cx > maxNameWidth)
                 maxNameWidth = ns.cx;
         }
+        // Classic Font: reserve room for the covenant icon drawn left of the name.
+        if (g_useDsFont && DSFont_Ready() && g_iconsReady && maxNameWidth > 0)
+            maxNameWidth += g_fontHeight + 3;
     }
 
     // Column order: HP | marker | name. On a RIGHT-anchored corner, mirror it to name | marker |
@@ -6723,10 +7434,34 @@ static void RenderOverlayToDIBAndSubmit()
         MeasureControllerSetupPanel(hdc, &setupWidth, &setupHeight);
     }
 
+    // Measure the live settings panel likewise.
+    int settingsWidth = 0;
+    int settingsHeight = 0;
+    if (drawSettings)
+    {
+        SelectObject(hdc, smallFont);
+        MeasureLiveSettingsPanel(hdc, &settingsWidth, &settingsHeight);
+    }
+
     int contentW = nameX + maxNameWidth + 3;   // small trailing margin (keeps the name outline unclipped)
     if (drawSetup && setupWidth + 8 > contentW)
         contentW = setupWidth + 8;
-    int contentH = blockHeight + setupHeight + 2;
+    if (drawSettings && settingsWidth + 8 > contentW)
+        contentW = settingsWidth + 8;
+
+    // Detailed HP-bar style prints the HP number on the OUTER side of the name. The bitmap is
+    // otherwise sized tightly, so reserve room for it: on the left when columns are mirrored
+    // (name left-most), otherwise on the right. All row/setup drawing shifts right by leftPad.
+    int leftPad = 0, rightPad = 0;
+    if (g_hpBars && g_hpBarStyle == HPBAR_DETAILED && g_showName)
+    {
+        SIZE dmgMax; ZeroMemory(&dmgMax, sizeof(dmgMax));
+        MeasA(hdc, "9999", 4, g_fontHeight, &dmgMax);
+        int reserve = dmgMax.cx + smallTm.tmAveCharWidth + 3;
+        if (rightAlign) leftPad = reserve; else rightPad = reserve;
+        contentW += leftPad + rightPad;
+    }
+    int contentH = blockHeight + setupHeight + settingsHeight + 2;
     if (contentW < 1) contentW = 1;
     if (contentH < 1) contentH = 1;
 
@@ -6747,15 +7482,33 @@ static void RenderOverlayToDIBAndSubmit()
     {
         HBITMAP oldBmp = (HBITMAP)SelectObject(hdc, dib);
 
-        RECT rcAll = { 0, 0, contentW, contentH };
-        HBRUSH keyBrush = CreateSolidBrush(OVERLAY_TRANSPARENT_KEY);
-        FillRect(hdc, &rcAll, keyBrush);
-        DeleteObject(keyBrush);
+        // Always magenta color-key fill: GDI graphics (HP bars, boxes) draw opaque and get keyed to
+        // alpha in the post-pass. DSFont text is DEFERRED (DsPush) and composited AFTER that pass so
+        // glyph anti-aliasing blends over the finished bars/background, not over magenta.
+        g_rtBits = (uint32_t*)bits; g_rtW = contentW; g_rtH = contentH; g_rtStride = contentW;
+        g_rtActive = (g_useDsFont && DSFont_Ready());
+        g_dsCurPx = g_fontHeight;
+        g_dsCmds.clear();
+        g_dsIconCmds.clear();
+        g_dsGaugeCmds.clear();
+        {
+            RECT rcAll = { 0, 0, contentW, contentH };
+            HBRUSH keyBrush = CreateSolidBrush(OVERLAY_TRANSPARENT_KEY);
+            FillRect(hdc, &rcAll, keyBrush);
+            DeleteObject(keyBrush);
+        }
 
         SetBkMode(hdc, TRANSPARENT);
 
-        int x = 0;
+        int x = leftPad;   // reserve a left gutter for the detailed-style damage number (0 otherwise)
         int y = 0;
+
+        // Live settings panel rides at the top of the bitmap when open.
+        if (drawSettings)
+        {
+            SelectObject(hdc, smallFont);
+            y = DrawLiveSettingsPanel(hdc, x, y);
+        }
 
         // Controller-setup panel rides above the rows in the same bitmap.
         if (drawSetup)
@@ -6811,49 +7564,149 @@ static void RenderOverlayToDIBAndSubmit()
             {
                 if (g_hpBars && row.hasHp && row.hpMax > 0 && !row.disconnected)
                 {
-                    DrawOverlayHpBar(hdc, hpColX, hpY, hpFieldWidth - 6, hpTm.tmHeight, row);
+                    DrawOverlayHpBar(hdc, hpColX, hpY, hpFieldWidth - 6, hpTm.tmHeight, row, smallFont);
                 }
                 else
                 {
                     SelectObject(hdc, hpFont);
+                    g_dsCurPx = g_hpFontHeight;
                     DrawOverlayHp(hdc, hpColX, hpY, row, hpLine);
                 }
             }
 
             SelectObject(hdc, smallFont);
+            g_dsCurPx = g_fontHeight;
 
             bool drawMarker = row.isLocal ? g_showLocalMarker : g_showPing;
             if (drawMarker)
             {
-                SIZE markerSize; ZeroMemory(&markerSize, sizeof(markerSize));
-                GetTextExtentPoint32A(hdc, markerLine, lstrlenA(markerLine), &markerSize);
-                int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
-                DrawOverlayName(hdc, markerX, smallY, row, markerLine);
+                // Own row: show the white circlet icon in place of the "\[T]/" text. Icons only
+                // composite in Classic Font mode (the g_rtActive flush), so gate on it and fall back to
+                // the text marker otherwise.
+                if (row.isLocal && g_iconsReady && g_useDsFont && DSFont_Ready() &&
+                    ICON_LOCAL_MARKER < g_iconCount)
+                {
+                    int size = g_fontHeight;
+                    int ix = markerGutterX + max(0, (markerGutterWidth - size) / 2);
+                    int iy = y + max(0, (lineHeight - size) / 2);
+                    DsIconCmd c; c.idx = ICON_LOCAL_MARKER; c.x = ix; c.y = iy; c.size = size;
+                    g_dsIconCmds.push_back(c);
+                }
+                else
+                {
+                    SIZE markerSize; ZeroMemory(&markerSize, sizeof(markerSize));
+                    MeasA(hdc, markerLine, lstrlenA(markerLine), g_fontHeight, &markerSize);
+                    int markerX = markerGutterX + max(0, (markerGutterWidth - markerSize.cx) / 2);
+                    // Ping/marker text is neutral info -> white, NOT role-coloured (which renders black
+                    // for invaders/forest/blue). Always neutral white; disconnected grey. Never 1HP-tinted.
+                    COLORREF markerFill = row.disconnected ? RGB(150, 150, 150) : RGB(240, 240, 240);
+                    DrawTextOutlineThick(hdc, markerX, smallY, RGB(0, 0, 0), markerFill, markerLine);
+                }
             }
 
             if (g_showName)
-                DrawOverlayName(hdc, x + colNameX, smallY, row, nameLine);
+            {
+                bool iconsActive = (g_useDsFont && DSFont_Ready() && g_iconsReady);
+                int  ico    = iconsActive ? IconIndexForRow(row) : -1;
+                int  iconW  = g_fontHeight;
+                int  slot   = iconsActive ? (iconW + 3) : 0;   // icon column (reserved for every row)
+                int  colLeft = x + colNameX;
+                int  colRight = colLeft + maxNameWidth;
+
+                SIZE ns; ZeroMemory(&ns, sizeof(ns));
+                MeasA(hdc, nameLine, lstrlenA(nameLine), g_fontHeight, &ns);
+
+                int nameX;
+                if (rightAlign)
+                {
+                    // Right-anchored: icon to the RIGHT of the name, name right-aligned to the column.
+                    // The icon slot is reserved for every row so names line up regardless of icon.
+                    nameX = colRight - slot - ns.cx;
+                    if (ico >= 0)
+                    {
+                        DsIconCmd c; c.idx = ico; c.x = colRight - iconW; c.y = smallY; c.size = iconW;
+                        g_dsIconCmds.push_back(c);
+                    }
+                }
+                else
+                {
+                    // Left-anchored: icon to the LEFT of the name, name left-aligned.
+                    nameX = colLeft;
+                    if (ico >= 0)
+                    {
+                        DsIconCmd c; c.idx = ico; c.x = nameX; c.y = smallY; c.size = iconW;
+                        g_dsIconCmds.push_back(c);
+                        nameX += iconW + 3;
+                    }
+                }
+
+                // No outline on the name in Classic Font mode (icon carries the type; g_dsNameCtx
+                // stays false so DrawTextOutlineThick draws the fill only).
+                if (g_useDsFont && DSFont_Ready())
+                    DrawTextOutlineThick(hdc, nameX, smallY, RGB(0, 0, 0), RGB(240, 240, 240), nameLine);
+                else
+                    DrawOverlayName(hdc, nameX, smallY, row, nameLine);
+
+                // Detailed style: the HP number sits on the outer side of the name (to its left on a
+                // right-anchored corner, to its right otherwise) -- anchored to the actual name X.
+                if (g_hpBars && g_hpBarStyle == HPBAR_DETAILED && row.hasHp && row.hpMax > 0 && !row.disconnected)
+                {
+                    SelectObject(hdc, smallFont);
+                    DrawNameHpNumber(hdc, nameX, ns.cx, smallY, smallFont, row, rightAlign, smallTm.tmAveCharWidth);
+                }
+            }
 
             y += lineHeight;
         }
 
         GdiFlush();
 
-        // GDI leaves the alpha byte at 0. Convert the color-key to transparent and
-        // make every other pixel opaque, producing valid A8R8G8B8 (0xAARRGGBB).
-        DWORD* px = (DWORD*)bits;
-        int count = contentW * contentH;
-        for (int i = 0; i < count; i++)
+        // GDI leaves the alpha byte at 0. Convert the color-key to transparent and make every other
+        // (GDI-drawn) pixel opaque, producing valid A8R8G8B8 (0xAARRGGBB).
         {
-            DWORD c = px[i];
-            if ((c & 0x00FFFFFF) == 0x00FF00FF) // OVERLAY_TRANSPARENT_KEY = magenta
-                px[i] = 0x00000000;
-            else
-                px[i] = c | 0xFF000000;
+            DWORD* px = (DWORD*)bits;
+            int count = contentW * contentH;
+            for (int i = 0; i < count; i++)
+            {
+                DWORD c = px[i];
+                if ((c & 0x00FFFFFF) == 0x00FF00FF) // OVERLAY_TRANSPARENT_KEY = magenta
+                    px[i] = 0x00000000;
+                else
+                    px[i] = c | 0xFF000000;
+            }
+        }
+
+        // Composite the deferred DSFont glyphs over the finished (keyed) buffer with real alpha,
+        // so text sits on top of the HP bars and blends cleanly against the transparent background.
+        // Gauge frames blit over the finished (keyed) bars in any font mode -- they only need the D3D
+        // target, not the DsFont deferred-text machinery. They go first so covenant icons and names on
+        // the same row sit on top.
+        if (g_rtBits)
+        {
+            for (size_t gi = 0; gi < g_dsGaugeCmds.size(); gi++)
+            {
+                const DsGaugeCmd& gc = g_dsGaugeCmds[gi];
+                BlitGaugeRT(gc.src, gc.sw, gc.sh, gc.dx, gc.dy, gc.dw, gc.dh);
+            }
+        }
+        if (g_rtActive)
+        {
+            for (size_t ii = 0; ii < g_dsIconCmds.size(); ii++)
+            {
+                const DsIconCmd& ic = g_dsIconCmds[ii];
+                BlitIconRT(ic.idx, ic.x, ic.y, ic.size);
+            }
+            for (size_t ci = 0; ci < g_dsCmds.size(); ci++)
+            {
+                const DsTextCmd& cmd = g_dsCmds[ci];
+                DSFont_DrawUTF8(g_rtBits, g_rtW, g_rtH, g_rtStride, cmd.x, cmd.y,
+                                cmd.text.c_str(), (int)cmd.text.size(), cmd.fill, cmd.px, cmd.outline, cmd.rad);
+            }
         }
 
         D3DOverlay_Submit(bits, contentW, contentH, (int)g_corner, g_paddingX, g_paddingY);
 
+        g_rtActive = false; g_rtBits = nullptr; g_dsCmds.clear(); g_dsIconCmds.clear(); g_dsGaugeCmds.clear();
         SelectObject(hdc, oldBmp);
     }
 
@@ -6969,6 +7822,8 @@ static DWORD WINAPI HotkeyThread(LPVOID)
     // Optional manual trigger for the Steam controller binding panel (0 = off).
     int bindKey = GetPrivateProfileIntA("Controller", "BindingNudgeKey", 0, g_iniPath);
     bool bindPrevDown = false;
+    // Live settings quick-panel edge state (open/close + Up/Down/toggle).
+    bool settingsOpenPrev = false, navUpPrev = false, navDnPrev = false, navTogPrev = false;
     while (g_running)
     {
         // Resolve game focus once per tick; the binds below only fire while the game
@@ -7015,6 +7870,62 @@ static DWORD WINAPI HotkeyThread(LPVOID)
             else
             {
                 setupPrevDown = false;
+            }
+        }
+
+        // Live settings quick-panel. The settings bind (default Shift+F4) opens/closes the
+        // panel; while open, the modifier + Up/Down move the highlighted row and modifier +
+        // Enter/Left/Right toggle it -- writing the change to the INI (when the row persists)
+        // and applying it in-frame. The Shift modifier keeps the nav keys off DS's own
+        // bindings so the game ignores them. Only fires while the game window is focused.
+        // NOTE: a bare in-game menu cursor may still move on Up/Down; fully blocking game
+        // input (the game's input_state byte) is a possible future refinement.
+        {
+            bool modOk = (g_settingsModifier <= 0) ||
+                ((GetAsyncKeyState(g_settingsModifier) & 0x8000) != 0);
+
+            int sKey = g_settingsKey;
+            bool openDown = (sKey > 0 && sKey <= 255) &&
+                ((GetAsyncKeyState(sKey) & 0x8000) != 0);
+            if (openDown && !settingsOpenPrev && gameFocused && modOk)
+            {
+                g_settingsOpen = !g_settingsOpen;
+                WriteLogf("Settings panel %s via hotkey (vk=0x%02X mod=0x%02X).",
+                    g_settingsOpen ? "opened" : "closed", sKey, g_settingsModifier);
+            }
+            settingsOpenPrev = openDown;
+
+            if (g_settingsOpen && gameFocused && modOk)
+            {
+                bool up  = (GetAsyncKeyState(VK_UP)   & 0x8000) != 0;
+                bool dn  = (GetAsyncKeyState(VK_DOWN) & 0x8000) != 0;
+                bool tog = ((GetAsyncKeyState(VK_RETURN) & 0x8000) != 0) ||
+                           ((GetAsyncKeyState(VK_LEFT)   & 0x8000) != 0) ||
+                           ((GetAsyncKeyState(VK_RIGHT)  & 0x8000) != 0);
+
+                if (up && !navUpPrev)
+                    g_settingsCursor = (g_settingsCursor + kLiveSettingsCount - 1) % kLiveSettingsCount;
+                if (dn && !navDnPrev)
+                    g_settingsCursor = (g_settingsCursor + 1) % kLiveSettingsCount;
+                if (tog && !navTogPrev)
+                {
+                    int idx = g_settingsCursor;
+                    if (idx >= 0 && idx < kLiveSettingsCount)
+                    {
+                        LiveSettingItem& it = kLiveSettings[idx];
+                        bool now = !(*it.var);
+                        *it.var = now;
+                        if (it.section != NULL && it.key != NULL)
+                            WritePrivateProfileStringA(it.section, it.key, now ? "1" : "0", g_iniPath);
+                        WriteLogf("Settings: %s -> %s%s.", it.label, now ? "ON" : "off",
+                            it.section ? " (saved)" : "");
+                    }
+                }
+                navUpPrev = up; navDnPrev = dn; navTogPrev = tog;
+            }
+            else
+            {
+                navUpPrev = navDnPrev = navTogPrev = false;
             }
         }
 

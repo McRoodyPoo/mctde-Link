@@ -92,6 +92,7 @@
     <ClInclude Include="PhantomUnleashedStage1.h" />
     <ClInclude Include="PhantomUnleashedStage2.h" />
     <ClInclude Include="HideSoulCounter.h" />
+    <ClInclude Include="DSFont.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp" />
@@ -104,6 +105,9 @@
     <ClCompile Include="PhantomUnleashedStage1.cpp" />
     <ClCompile Include="PhantomUnleashedStage2.cpp" />
     <ClCompile Include="HideSoulCounter.cpp" />
+    <ClCompile Include="DSFont.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="version.rc" />

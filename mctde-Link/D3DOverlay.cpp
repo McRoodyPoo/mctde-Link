@@ -139,6 +139,9 @@ void D3DOverlay_CaptureRawScene(void* realDevice)
 }
 static int  g_texW = 0, g_texH = 0;
 static int  g_drawW = 0, g_drawH = 0, g_drawCorner = 0, g_drawPadX = 0, g_drawPadY = 0;
+static int  g_ovlRenderH = 0;   // last viewport height, for UI-scale matching
+
+int D3DOverlay_RenderHeight() { return g_ovlRenderH; }
 static bool g_hasDraw = false;
 static std::vector<BYTE> g_renderBuf;
 
@@ -208,6 +211,7 @@ static void DrawQuad(IDirect3DDevice9* dev)
     D3DVIEWPORT9 vp;
     if (FAILED(dev->GetViewport(&vp))) return;
     int sw = (int)vp.Width, sh = (int)vp.Height, w = g_drawW, h = g_drawH, x, y;
+    g_ovlRenderH = sh;
     switch (g_drawCorner)
     {
     case 1: x = sw - w - g_drawPadX; y = g_drawPadY;          break;
@@ -337,6 +341,21 @@ static float g_ndcX0 = 0.55f;        // drop when every vertex x > this (toward 
 static float g_ndcY0 = -0.55f;       // ...and y < this (toward the bottom; NDC +1 is top, -1 bottom)
 static bool  g_hideRegionLoaded = false;
 
+// ---- Auto-hide the overlay while an in-game menu (equipment/inventory/etc.) is open. ----
+// Detected purely from the render stream: the game's menu draws far more 2D/NDC UI quads per frame
+// than the gameplay HUD, so a per-frame 2D-quad count over a threshold (debounced against flicker)
+// reads as "a menu is up" -> skip the overlay draw at Present. No game-memory RE, no address that
+// shifts between PTDE patches. MenuDrawThreshold is ini-tunable; MenuDetectLog dumps per-frame counts.
+static bool  g_hideInMenu = false;      // [Overlay] HideInMenu
+static int   g_menuThreshold = 140;     // [Overlay] MenuDrawThreshold -- 2D-quad count that means "menu"
+static bool  g_menuDetectLog = false;   // [Debug]  MenuDetectLog -- log per-frame 2D counts for tuning
+static int   g_frame2DCount = 0;        // 2D/NDC UI quads seen this frame (render thread only)
+static int   g_menuEnter = 0;           // consecutive frames above threshold (enter debounce)
+static int   g_menuHold = 0;            // debounce: frames left to keep treating the menu as open
+static bool  g_menuOpen = false;        // current debounced state (checked at Present)
+static const int MENU_ENTER_FRAMES = 3; // require this many frames over threshold before hiding
+static const int MENU_HOLD_FRAMES  = 6; // ~0.2s tail so brief count dips don't flicker the overlay
+
 static void LoadHideRegionConfig()
 {
     if (g_hideRegionLoaded) return;
@@ -354,6 +373,54 @@ static void LoadHideRegionConfig()
     GetPrivateProfileStringA("HideSoulCounter", "RegionY", "-0.55", buf, sizeof(buf), path); g_ndcY0 = (float)atof(buf);
     if (g_ndcX0 < -1.5f || g_ndcX0 > 1.5f) g_ndcX0 = 0.55f;
     if (g_ndcY0 < -1.5f || g_ndcY0 > 1.5f) g_ndcY0 = -0.55f;
+
+    g_hideInMenu = GetPrivateProfileIntA("Overlay", "HideInMenu", 0, path) != 0;
+    g_menuThreshold = GetPrivateProfileIntA("Overlay", "MenuDrawThreshold", 140, path);
+    if (g_menuThreshold < 4)    g_menuThreshold = 4;
+    if (g_menuThreshold > 4000) g_menuThreshold = 4000;
+    g_menuDetectLog = GetPrivateProfileIntA("Debug", "MenuDetectLog", 0, path) != 0;
+}
+
+// Count a UP draw whose first vertex sits in clip space (NDC) as a 2D UI quad. The game uses UP
+// draws almost exclusively for 2D UI (3D geometry goes through vertex buffers), so this cleanly
+// tallies HUD/menu activity. Pure float reads -- safe in the per-draw hot path.
+static void CountMenuDraw(const void* vtx, UINT stride, UINT nverts)
+{
+    if (!vtx || stride < 8 || nverts == 0 || nverts > 4096) return;
+    const float* v0 = (const float*)vtx;
+    if (v0[0] < -1.3f || v0[0] > 1.3f || v0[1] < -1.3f || v0[1] > 1.3f) return; // out of NDC -> not 2D UI
+    ++g_frame2DCount;
+}
+
+// Throttled (2 Hz) append of the per-frame 2D count next to the dll, for tuning MenuDrawThreshold.
+static void MenuDetectLogThrottled(int count, bool open)
+{
+    static ULONGLONG lastMs = 0; ULONGLONG now = GetTickCount64();
+    if (now - lastMs < 500) return; lastMs = now;
+    char path[MAX_PATH] = { 0 }; HMODULE self = nullptr;
+    GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCSTR>(&MenuDetectLogThrottled), &self);
+    GetModuleFileNameA(self, path, MAX_PATH); char* s = strrchr(path, '\\');
+    if (s) lstrcpyA(s + 1, "mctde_menudetect.log"); else lstrcpyA(path, "mctde_menudetect.log");
+    HANDLE f = CreateFileA(path, FILE_APPEND_DATA, FILE_SHARE_READ, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return;
+    char line[128]; int n = wsprintfA(line, "2Dquads=%d menuOpen=%d thresh=%d\r\n", count, open ? 1 : 0, g_menuThreshold);
+    DWORD wr; WriteFile(f, line, n, &wr, nullptr); CloseHandle(f);
+}
+
+// Decide (once per Present) whether a menu is open, debounced, then reset the per-frame counter.
+static void EvaluateMenuState()
+{
+    if (!g_hideInMenu) { g_menuOpen = false; g_frame2DCount = 0; g_menuEnter = 0; g_menuHold = 0; return; }
+    int c = g_frame2DCount; g_frame2DCount = 0;
+    // Enter only after the count stays above threshold for several frames (kills single-frame spikes),
+    // then hold for a short tail so brief dips mid-menu don't flicker the overlay back on.
+    if (c >= g_menuThreshold) { if (g_menuEnter < MENU_ENTER_FRAMES) ++g_menuEnter; }
+    else                        g_menuEnter = 0;
+    if (g_menuEnter >= MENU_ENTER_FRAMES) g_menuHold = MENU_HOLD_FRAMES;
+    else if (g_menuHold > 0)              --g_menuHold;
+    g_menuOpen = (g_menuHold > 0);
+    if (g_menuDetectLog) MenuDetectLogThrottled(c, g_menuOpen);
 }
 
 static UINT PrimVertCount(D3DPRIMITIVETYPE t, UINT pc)
@@ -536,7 +603,8 @@ public:
     }
     STDMETHODIMP Present(const RECT* a, const RECT* b, HWND c, const RGNDATA* d) override
     {
-        DrawOverlayFrame(m_real);
+        EvaluateMenuState();                          // decide if a menu is up (from this frame's 2D draws)
+        if (!g_menuOpen) DrawOverlayFrame(m_real);     // ...and skip the overlay while it is
         if (g_hideRegion) { static long fr = 0; if ((++fr % 180) == 0) RingFlush(); } // dump HUD capture ~every few s
         return m_real->Present(a, b, c, d);
     }
@@ -622,10 +690,12 @@ public:
     STDMETHODIMP DrawIndexedPrimitive(D3DPRIMITIVETYPE p, INT bv, UINT mv, UINT nv, UINT si, UINT pc) override { return m_real->DrawIndexedPrimitive(p, bv, mv, nv, si, pc); }
     STDMETHODIMP DrawPrimitiveUP(D3DPRIMITIVETYPE p, UINT c, const void* d, UINT st) override {
         if (g_hideRegion) RingPushDraw(d, st, PrimVertCount(p, c)); // capture for identification
+        if (g_hideInMenu) CountMenuDraw(d, st, PrimVertCount(p, c)); // menu detection
         return m_real->DrawPrimitiveUP(p, c, d, st);
     }
     STDMETHODIMP DrawIndexedPrimitiveUP(D3DPRIMITIVETYPE p, UINT mv, UINT nv, UINT pc, const void* id, D3DFORMAT idf, const void* vd, UINT vst) override {
         if (g_hideRegion) RingPushDraw(vd, vst, nv); // capture for identification
+        if (g_hideInMenu) CountMenuDraw(vd, vst, nv); // menu detection
         return m_real->DrawIndexedPrimitiveUP(p, mv, nv, pc, id, idf, vd, vst);
     }
     STDMETHODIMP ProcessVertices(UINT s, UINT d, UINT c, IDirect3DVertexBuffer9* db, IDirect3DVertexDeclaration9* vd, DWORD f) override { return m_real->ProcessVertices(s, d, c, db, vd, f); }

@@ -164,6 +164,20 @@ Decimal offset from the character object to max HP. `728` is `0x2D8`, the defaul
 
 How long the 1 HP highlight should remain visible after a 1 HP write is detected. Values above `5000` are clamped.
 
+`OneHpLatencyComp=1`
+
+Latency fairness for the 1 HP race (the win/loss/draw colouring of a near-simultaneous finish). When on, each actor's 1 HP moment is back-dated by the host's own measured one-way delay to that player before deciding who hit the floor first, so a laggier player observed late is not misranked. One-way delay is taken from true ping (RTT/2) when the player is also running `mctde-Link`, otherwise from half the game session ping; the local player and players with no known ping contribute no delay. Set `0` to rank purely by local arrival order (the pre-compensation behaviour).
+
+The race fill colours are recolours of the game's own red HP gauge so they fit PTDE: **gold** = winner (survivor), **silver** = loser (first to the floor), a blinking **bronze** = a draw, and a desaturated near-**black** = a player not running `mctde-Link` (their finish can't be latency-verified, so no win/loss is claimed for them). For the cleanest reads, have all participants run `mctde-Link` with `[TruePing] DisplayMode=2` (floor/best).
+
+`OneHpLatencyMaxMs=1000`
+
+Caps how far a single 1 HP event may be back-dated, guarding against a bogus huge ping skewing the race. Clamped to `5000`.
+
+`OneHpLatencyTieMs=60`
+
+The dead-heat band, in milliseconds. Two players whose latency-compensated 1 HP times fall within this window are shown as a **draw** (blinking bronze) rather than a winner/loser, and the race only re-orders when a later report proves earlier by more than this. This is the residual measurement uncertainty (jitter, RTT/2 asymmetry) — draws inside it are genuine, not false precision. Clamped to `500`.
+
 `PollMs=33`
 
 Fast HP polling interval in milliseconds. Lower values update HP more often but cost more CPU time. Clamped to `1` through `100`.

@@ -425,7 +425,7 @@ struct OverlayRow
     int hpCurrentOffset = -1;
     int hpMaxOffset = -1;
     ULONGLONG hpOneUntilTick = 0;
-    int oneHpRank = 0;                // 1HP race highlight: 0 none, 1 first (dark red), 2 second (bright green)
+    int oneHpRank = 0;                // 1HP race: 0 none, 1 first-to-floor (silver loser), 2 second (gold winner), 3 draw (bronze)
     int hpGhost = -1;                 // pre-damage HP level for the lingering yellow chip
     ULONGLONG hpGhostUntilTick = 0;   // when the yellow chip stops showing
     uintptr_t connection = 0;
@@ -450,42 +450,77 @@ static bool g_rowsLockReady = false;
 static std::vector<OverlayRow> g_rows;
 static std::vector<WorldActorRow> g_worldRows;
 static std::unordered_map<uintptr_t, ULONGLONG> g_oneHpUntilByChr;
-// "Close game" 1HP race highlight. The first actor to reach 1HP opens a 1.5s window and is tagged
-// rank 1 (dark red). Any DIFFERENT actor that reaches 1HP while that window is still open is tagged
-// rank 2 (bright green). Lets you eyeball who bottomed out first in a near-simultaneous finish. A
-// rank persists as long as that actor's 1HP marker is live; the window is judged from the first hit.
+// "Close game" 1HP race highlight, latency-compensated. Each actor's 1HP event is back-dated by the
+// host's measured one-way delay to that player, then ranked by that compensated time: the earliest to
+// the floor is rank 1 (silver loser), a clearly-later actor within 1.5s is rank 2 (gold winner), and
+// two within the tie band are a dead heat -> rank 3 (bronze draw). A later report that proves earlier
+// by more than the band demotes the old leader. Rank persists while the actor's 1HP marker is live.
+// (Colours: RaceStateForRow / FillGaugeRaceState.)
 struct OneHpRank { int rank; ULONGLONG untilTick; };
 static std::unordered_map<uintptr_t, OneHpRank> g_oneHpRankByChr;
 static const DWORD ONE_HP_RACE_WINDOW_MS = 1500;
-static ULONGLONG g_oneHpWindowStartTick = 0;
-static uintptr_t g_oneHpWindowFirstChr = 0;
+static uintptr_t g_oneHpWindowFirstChr = 0;   // current race leader (rank 1) actor
+static ULONGLONG g_oneHpLeaderEvt = 0;        // leader's latency-compensated event time (host clock)
 
-// Caller must hold g_rowsLock. Start a 1HP flash for this actor, LATCHED: the first hit assigns the
-// colour (rank 1 = red for first to the floor in a fresh window, rank 2 = green for a second actor
-// within 1.5s) and a fixed 1.5s lifetime. While that flash is live, further hits are a no-op -- the
-// colour and end tick never change until it expires. Returns the flash's end tick. This is the single
-// place the 1HP marker is created; every trigger (HP-write hook, roster rebuild, HP poll) routes here
-// so the flash stays a solid 1.5s from the first hit and can never be re-extended or recoloured.
-static ULONGLONG StartOneHpFlash(uintptr_t chr, ULONGLONG now)
+// [HP] latency-fairness config (loaded in LoadConfig; declared here so StartOneHpFlash can see them).
+static bool  g_oneHpLatencyComp = true;   // OneHpLatencyComp -- master enable for back-dating
+static DWORD g_oneHpLatencyMaxMs = 1000;  // OneHpLatencyMaxMs -- cap on how far an event is back-dated
+static DWORD g_oneHpLatencyTieMs = 60;    // OneHpLatencyTieMs -- dead-heat band (draw) / reorder guard
+
+// Caller must hold g_rowsLock. Register a 1HP hit for `chr`, ranking the race by LATENCY-COMPENSATED
+// event time evt = now - oneWayMs so a laggier player observed late isn't wrongly ranked second. This
+// is the single place ranks are decided; the HP-write hook, roster rebuild and HP poll all route here.
+// Each actor's flash lifetime is latched to a fixed 1.5s from its first hit; only the rank may change.
+static ULONGLONG StartOneHpFlash(uintptr_t chr, ULONGLONG now, DWORD oneWayMs)
 {
+    if (!g_oneHpLatencyComp) oneWayMs = 0;
+    else if (oneWayMs > g_oneHpLatencyMaxMs) oneWayMs = g_oneHpLatencyMaxMs;
+    ULONGLONG evt = (now > (ULONGLONG)oneWayMs) ? now - (ULONGLONG)oneWayMs : 0;
+
     std::unordered_map<uintptr_t, OneHpRank>::iterator it = g_oneHpRankByChr.find(chr);
-    if (it != g_oneHpRankByChr.end() && it->second.untilTick > now)
-        return it->second.untilTick;   // active flash -> latched, leave colour and end tick untouched
+    bool hasLive = (it != g_oneHpRankByChr.end() && it->second.untilTick > now);
+    ULONGLONG endTick = hasLive ? it->second.untilTick : now + ONE_HP_RACE_WINDOW_MS;
+
+    // Is `chr` inside the current leader's still-open race window (judged in compensated time)?
+    ULONGLONG span = (evt >= g_oneHpLeaderEvt) ? (evt - g_oneHpLeaderEvt) : (g_oneHpLeaderEvt - evt);
+    bool windowOpen = (g_oneHpWindowFirstChr != 0) && (span <= ONE_HP_RACE_WINDOW_MS);
 
     int rank;
-    if (g_oneHpWindowStartTick == 0 || g_oneHpWindowFirstChr == 0 ||
-        now - g_oneHpWindowStartTick > ONE_HP_RACE_WINDOW_MS)
+    if (!windowOpen)
     {
-        g_oneHpWindowStartTick = now;      // fresh window -> this actor is first to the floor
-        g_oneHpWindowFirstChr = chr;
+        g_oneHpWindowFirstChr = chr;       // fresh race -> this actor is first to the floor
+        g_oneHpLeaderEvt = evt;
         rank = 1;
     }
     else if (chr == g_oneHpWindowFirstChr)
-        rank = 1;                          // same actor re-entering inside its own window stays first
+    {
+        if (evt < g_oneHpLeaderEvt) g_oneHpLeaderEvt = evt;   // keep the earliest evt for the leader
+        rank = hasLive ? it->second.rank : 1;
+        if (rank == 0) rank = 1;
+    }
     else
-        rank = 2;                          // a different actor within 1.5s -> second
+    {
+        uintptr_t prevLeader = g_oneHpWindowFirstChr;
+        long long gap = (long long)g_oneHpLeaderEvt - (long long)evt;   // >0 => this actor hit earlier
+        std::unordered_map<uintptr_t, OneHpRank>::iterator lit = g_oneHpRankByChr.find(prevLeader);
+        if (gap > (long long)g_oneHpLatencyTieMs)
+        {
+            if (lit != g_oneHpRankByChr.end()) lit->second.rank = 2;   // old leader hit later -> winner
+            g_oneHpWindowFirstChr = chr;                               // this actor is the true first
+            g_oneHpLeaderEvt = evt;
+            rank = 1;
+        }
+        else if (gap < -(long long)g_oneHpLatencyTieMs)
+        {
+            rank = 2;                                                  // clearly later -> winner
+        }
+        else
+        {
+            if (lit != g_oneHpRankByChr.end()) lit->second.rank = 3;   // dead heat -> both draw
+            rank = 3;
+        }
+    }
 
-    ULONGLONG endTick = now + ONE_HP_RACE_WINDOW_MS;   // solid, fixed 1.5s flash
     OneHpRank r; r.rank = rank; r.untilTick = endTick;
     g_oneHpRankByChr[chr] = r;
     g_oneHpUntilByChr[chr] = endTick;
@@ -499,6 +534,20 @@ static int OneHpRaceRank(uintptr_t chr, ULONGLONG now)
     if (it != g_oneHpRankByChr.end() && it->second.untilTick > now)
         return it->second.rank;
     return 0;
+}
+
+// Caller must hold g_rowsLock. The host's own measured one-way delay (ms) to this row's player, used
+// to back-date its 1HP event so the race is judged in ~true time. Prefer the true-ping side channel
+// (already RTT/2); fall back to half the game session ping; the local player and unknowns add none.
+// The final cap is applied in StartOneHpFlash (OneHpLatencyMaxMs).
+static DWORD OneWayLatencyMsForRow(const OverlayRow& row)
+{
+    if (row.isLocal) return 0;
+    int oneWay = -1;
+    if (row.hasTruePing && row.truePing >= 0) oneWay = row.truePing;
+    else if (row.ping > 0)                    oneWay = row.ping / 2;
+    if (oneWay < 0) return 0;
+    return (DWORD)oneWay;
 }
 
 struct DmgGhost { int ghostHp; ULONGLONG untilTick; };
@@ -1431,6 +1480,15 @@ static void LoadConfig(bool logIt)
     g_hpMaxOffset = GetPrivateProfileIntA("HP", "MaxOffset", DEFAULT_HP_MAX_OFFSET, g_iniPath);
     g_hpAutoScan = GetPrivateProfileIntA("HP", "AutoScan", 0, g_iniPath) != 0;
     g_hpOneLingerMs = (DWORD)GetPrivateProfileIntA("HP", "OneHpLingerMs", 500, g_iniPath);
+    // 1HP-race latency fairness: back-date each 1HP event by the host's measured one-way delay to that
+    // player before ranking red/green, so a laggier finish isn't misjudged. TieMs is the dead-heat band.
+    g_oneHpLatencyComp = GetPrivateProfileIntA("HP", "OneHpLatencyComp", 1, g_iniPath) != 0;
+    g_oneHpLatencyMaxMs = (DWORD)GetPrivateProfileIntA("HP", "OneHpLatencyMaxMs", 1000, g_iniPath);
+    if (g_oneHpLatencyMaxMs > 5000)
+        g_oneHpLatencyMaxMs = 5000;
+    g_oneHpLatencyTieMs = (DWORD)GetPrivateProfileIntA("HP", "OneHpLatencyTieMs", 60, g_iniPath);
+    if (g_oneHpLatencyTieMs > 500)
+        g_oneHpLatencyTieMs = 500;
     // ini self-migration: the shipped DamageLingerMs default rose from 1000 -> 1500. An ini written
     // by an older build carries an explicit "DamageLingerMs=1000", which would otherwise pin the old
     // feel forever. Rewrite ONLY that exact old-default value (a customized number is left alone, and
@@ -4223,9 +4281,9 @@ static void StabilizeRowsWithPrevious(std::vector<OverlayRow>& rows, const std::
         // Latch the 1HP race rank across rebuilds. The rank is decided ONCE, at the first 1HP hit
         // (NoteOneHpForRace, held in g_oneHpRankByChr) and seeded onto the live rows by the HP-write
         // hook -- but the per-poll rebuild derives hpOneUntilTick from hp==1 while leaving oneHpRank 0.
-        // Without carrying it, the first-place actor's rank resets to 0 every ~33ms and OneHpMarkerColor
-        // (rank 0 == bright green) flashes green over its dark-red marker -- even after the second actor
-        // has already gone green. Keep the old row's rank while its 1HP marker is still live.
+        // Without carrying it, the first-place actor's rank resets to 0 every ~33ms and RaceStateForRow
+        // (rank 0 == winner/gold) paints gold over its silver loser marker -- even after the second actor
+        // has already been ranked. Keep the old row's rank while its 1HP marker is still live.
         if (row.oneHpRank == 0 && old->oneHpRank != 0 && row.hpOneUntilTick != 0)
             row.oneHpRank = old->oneHpRank;
 
@@ -4603,12 +4661,16 @@ extern "C" __declspec(noinline) void __cdecl OnHpWriteHook(uintptr_t chr, int wr
     if (g_rowsLockReady)
     {
         EnterCriticalSection(&g_rowsLock);
-        // Real-time detection: this fires the instant the game writes 1 to an actor's HP, so it is the
-        // most accurate source for who reached 1HP first in a close finish. StartOneHpFlash latches the
-        // colour + a fixed 1.5s window; repeated writes while the flash is live change nothing.
+        // Real-time detection: fires the instant the game writes 1 to an actor's HP, the most accurate
+        // source for who reached 1HP first. Back-date by the host's measured one-way delay to that
+        // player so a laggier finish isn't misranked; then re-read ranks for every live-flash row so a
+        // demotion or draw of a DIFFERENT actor shows immediately, not only this chr.
         ULONGLONG now = GetTickCount64();
-        ULONGLONG until = StartOneHpFlash(chr, now);
-        int rank = OneHpRaceRank(chr, now);
+        DWORD oneWay = 0;
+        for (size_t i = 0; i < g_rows.size(); i++)
+            if (g_rows[i].chr == chr) { oneWay = OneWayLatencyMsForRow(g_rows[i]); break; }
+
+        ULONGLONG until = StartOneHpFlash(chr, now, oneWay);
 
         for (size_t i = 0; i < g_rows.size(); i++)
         {
@@ -4617,10 +4679,11 @@ extern "C" __declspec(noinline) void __cdecl OnHpWriteHook(uintptr_t chr, int wr
                 g_rows[i].hpOneUntilTick = until;
                 g_rows[i].hasHp = true;
                 g_rows[i].hp = 1;
-                g_rows[i].oneHpRank = rank;
                 if (g_rows[i].hpMax < 1)
                     g_rows[i].hpMax = hpMax;
             }
+            if (g_rows[i].hpOneUntilTick != 0 && now <= g_rows[i].hpOneUntilTick)
+                g_rows[i].oneHpRank = OneHpRaceRank(g_rows[i].chr, now);
         }
 
         LeaveCriticalSection(&g_rowsLock);
@@ -5361,13 +5424,87 @@ static void DrawTextOutlineHpOneBold(HDC hdc, int x, int y, const char* text)
     TextOutA(hdc, x + 1, y + 1, text, len);
 }
 
-// Colour for the live 1HP marker, chosen by the actor's race rank: dark red for the first to hit
-// 1HP in a window, bright green for the second. Rank 0 (uncontested / not yet ranked) keeps the
-// original bright-green marker so single-player 1HP still flashes green.
-static COLORREF OneHpMarkerColor(const OverlayRow& row)
+// 1HP-race gauge tints. Rather than flat overlay swatches (the old bright red/green, an eyesore
+// against PTDE's HUD), the win/loss/draw/unverified fills are the game's own red HP gradient
+// recoloured in HSL, so they keep the gauge's shading and read as Dark Souls:
+//   WINNER   -> the bar hue-shifted to a natural gold
+//   LOSER    -> the bar desaturated to silver
+//   DRAW     -> the bar hue-shifted to bronze, blinking (a dead heat within measurement precision)
+//   UNKNOWN  -> the bar desaturated + darkened toward black (a racer whose owner isn't running
+//               mctde-Link, so the finish can't be latency-verified and mustn't be shown as a result)
+enum OneHpRaceState { RACE_NONE = 0, RACE_LOSER = 1, RACE_WINNER = 2, RACE_DRAW = 3, RACE_UNKNOWN = 4 };
+
+// The game's red HP fill gradient (dusty red top -> deep maroon bottom), hoisted to file scope so
+// both the normal bar (FillGaugeRed) and the recoloured race fills derive from the same source.
+static const int kGaugeRedProfile[12][3] = {
+    {123,93,90},{112,80,77},{101,66,63},{90,53,49},{74,36,41},{69,28,30},
+    {63,20,19},{58,12,8},{58,4,8},{60,3,5},{66,0,0},{66,0,0} };
+
+static void RgbToHsl(int r, int g, int b, double& h, double& s, double& l)
 {
-    if (row.oneHpRank == 1) return RGB(170, 20, 20);   // first to 1HP in the window: dark red
-    return RGB(40, 255, 80);                            // second within 1.5s / uncontested: bright green
+    double rf = r / 255.0, gf = g / 255.0, bf = b / 255.0;
+    double mx = max(rf, max(gf, bf)), mn = min(rf, min(gf, bf));
+    l = (mx + mn) / 2.0;
+    double d = mx - mn;
+    if (d < 1e-6) { h = 0.0; s = 0.0; return; }
+    s = (l > 0.5) ? d / (2.0 - mx - mn) : d / (mx + mn);
+    if (mx == rf)      h = (gf - bf) / d + (gf < bf ? 6.0 : 0.0);
+    else if (mx == gf) h = (bf - rf) / d + 2.0;
+    else               h = (rf - gf) / d + 4.0;
+    h *= 60.0;
+}
+
+static double HueToRgbComp(double p, double q, double t)
+{
+    if (t < 0.0) t += 1.0;
+    if (t > 1.0) t -= 1.0;
+    if (t < 1.0 / 6.0) return p + (q - p) * 6.0 * t;
+    if (t < 1.0 / 2.0) return q;
+    if (t < 2.0 / 3.0) return p + (q - p) * (2.0 / 3.0 - t) * 6.0;
+    return p;
+}
+
+static void HslToRgb(double h, double s, double l, int& r, int& g, int& b)
+{
+    if (s <= 1e-6)
+    {
+        r = g = b = (int)(l * 255.0 + 0.5);
+    }
+    else
+    {
+        double q = (l < 0.5) ? l * (1.0 + s) : l + s - l * s;
+        double p = 2.0 * l - q;
+        double hn = h / 360.0;
+        r = (int)(HueToRgbComp(p, q, hn + 1.0 / 3.0) * 255.0 + 0.5);
+        g = (int)(HueToRgbComp(p, q, hn) * 255.0 + 0.5);
+        b = (int)(HueToRgbComp(p, q, hn - 1.0 / 3.0) * 255.0 + 0.5);
+    }
+    r = r < 0 ? 0 : (r > 255 ? 255 : r);
+    g = g < 0 ? 0 : (g > 255 ? 255 : g);
+    b = b < 0 ? 0 : (b > 255 ? 255 : b);
+}
+
+// Recolour one RGB: force hue (deg; < 0 keeps the source hue), scale saturation, scale lightness.
+static void RecolorRgb(int r, int g, int b, double forceHueDeg, double satMul, double lightMul,
+                       int& outR, int& outG, int& outB)
+{
+    double h, s, l; RgbToHsl(r, g, b, h, s, l);
+    if (forceHueDeg >= 0.0) h = forceHueDeg;
+    s *= satMul; if (s > 1.0) s = 1.0; if (s < 0.0) s = 0.0;
+    l *= lightMul; if (l > 1.0) l = 1.0; if (l < 0.0) l = 0.0;
+    HslToRgb(h, s, l, outR, outG, outB);
+}
+
+// The race state to paint for a row's 1HP flash. A live racer whose owner isn't running mctde-Link
+// (no true-ping side channel and not the local player) can't be latency-verified, so it is shown as
+// UNKNOWN (near-black) instead of a win/loss it hasn't earned. Otherwise: rank 1 = loser, rank 3 =
+// draw, and rank 2 / rank 0 (uncontested lone 1HP) = winner.
+static int RaceStateForRow(const OverlayRow& row)
+{
+    if (!row.isLocal && !row.hasTruePing) return RACE_UNKNOWN;
+    if (row.oneHpRank == 1) return RACE_LOSER;
+    if (row.oneHpRank == 3) return RACE_DRAW;
+    return RACE_WINNER;
 }
 
 // Classic Font mode: the covenant/role icon index for a row (0..7), or -1 for none. Mirrors the
@@ -5561,10 +5698,32 @@ static void FillGaugeGrad(HDC hdc, int x, int y, int w, int h, const int prof[12
 // Red HP gradient (light dusty top -> deep maroon bottom).
 static void FillGaugeRed(HDC hdc, int x, int y, int w, int h)
 {
-    static const int PROF[12][3] = {
-        {123,93,90},{112,80,77},{101,66,63},{90,53,49},{74,36,41},{69,28,30},
-        {63,20,19},{58,12,8},{58,4,8},{60,3,5},{66,0,0},{66,0,0} };
-    FillGaugeGrad(hdc, x, y, w, h, PROF);
+    FillGaugeGrad(hdc, x, y, w, h, kGaugeRedProfile);
+}
+// 1HP-race fill: the red HP gradient recoloured per race state, so a win/loss/draw still looks like
+// a DS gauge (see OneHpRaceState). Gold = winner, silver = loser, bronze pulse = draw, near-black =
+// a racer we can't latency-verify. The draw case blinks between a brighter and dimmer bronze.
+static void FillGaugeRaceState(HDC hdc, int x, int y, int w, int h, int state, ULONGLONG now)
+{
+    double hue = -1.0, satMul = 1.0, lightMul = 1.0;
+    switch (state)
+    {
+        case RACE_LOSER:   hue = -1.0; satMul = 0.08; lightMul = 1.85; break;  // desaturated silver
+        case RACE_UNKNOWN: hue = -1.0; satMul = 0.18; lightMul = 0.40; break;  // darkened near-black
+        case RACE_DRAW:
+        {
+            bool bright = ((now / 300) % 2) == 0;                              // ~1.7 Hz bronze pulse
+            hue = 30.0; satMul = 0.85; lightMul = bright ? 1.15 : 0.70;        // warm bronze
+            break;
+        }
+        case RACE_WINNER:
+        default:           hue = 47.0; satMul = 1.10; lightMul = 1.35; break;  // natural gold
+    }
+    int prof[12][3];
+    for (int i = 0; i < 12; i++)
+        RecolorRgb(kGaugeRedProfile[i][0], kGaugeRedProfile[i][1], kGaugeRedProfile[i][2],
+                   hue, satMul, lightMul, prof[i][0], prof[i][1], prof[i][2]);
+    FillGaugeGrad(hdc, x, y, w, h, prof);
 }
 // Olive-gold gradient used for the recently-lost ("damage") chunk -- the 4th fill strip in Menu08.
 static void FillGaugeYellow(HDC hdc, int x, int y, int w, int h)
@@ -5612,14 +5771,14 @@ static void DrawOverlayHpBar(HDC hdc, int x, int y, int w, int h, const OverlayR
         int fw = (int)(gaugeW * frac + 0.5);                 // current HP width
         int gw = (int)(gaugeW * ghostFrac + 0.5);            // pre-damage width (top of the lost chunk)
 
-        // 1HP race flash: for the whole latched 1.5s the ENTIRE bar goes one solid colour -- dark red
-        // for the first actor to hit 1HP, bright green for a second within 1.5s -- overriding the normal
-        // gauge/damage-chip entirely. The colour was decided once at the first hit and never changes.
+        // 1HP race flash: for the whole latched 1.5s the ENTIRE bar becomes the race-state recolour of
+        // the red gauge -- gold winner, silver loser, blinking bronze draw, near-black for an
+        // unverifiable (non-tool) racer -- overriding the normal gauge/damage-chip. The rank was decided
+        // once at the first hit; only the draw blink animates.
         bool oneHpFlash = (row.hpOneUntilTick != 0 && now <= row.hpOneUntilTick);
         if (oneHpFlash)
         {
-            RECT fr = { x, gy, x + gaugeW, gy + gaugeH };
-            HBRUSH fb = CreateSolidBrush(OneHpMarkerColor(row)); FillRect(hdc, &fr, fb); DeleteObject(fb);
+            FillGaugeRaceState(hdc, x, gy, gaugeW, gaugeH, RaceStateForRow(row), now);
         }
         else
         {
@@ -5651,9 +5810,8 @@ static void DrawOverlayHpBar(HDC hdc, int x, int y, int w, int h, const OverlayR
     int gw = (int)(w * ghostFrac + 0.5);
     if (row.hpOneUntilTick != 0 && now <= row.hpOneUntilTick)
     {
-        // Solid full-bar 1HP flash (see textured path).
-        RECT fr = { x, y, x + w, y + h };
-        HBRUSH fb = CreateSolidBrush(OneHpMarkerColor(row)); FillRect(hdc, &fr, fb); DeleteObject(fb);
+        // Full-bar 1HP flash, recoloured by race state (see textured path).
+        FillGaugeRaceState(hdc, x, y, w, h, RaceStateForRow(row), now);
     }
     else
     {
@@ -7185,7 +7343,7 @@ static DWORD WINAPI HpPollThread(LPVOID)
 
                         if (oneHpEdge || instantRefillHit)
                         {
-                            row.hpOneUntilTick = StartOneHpFlash(row.chr, now);   // latched fixed 1.5s
+                            row.hpOneUntilTick = StartOneHpFlash(row.chr, now, OneWayLatencyMsForRow(row));
                             row.oneHpRank = OneHpRaceRank(row.chr, now);
                         }
                     }

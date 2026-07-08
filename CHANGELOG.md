@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- 1HP race is now latency-fair: each player's 1HP moment is back-dated by the host's measured one-way delay before deciding who hit the floor first, so a laggier player observed late is no longer misranked (`[HP] OneHpLatencyComp`, `OneHpLatencyMaxMs`).
+- Near-simultaneous finishes within the dead-heat band show as a **draw** (`[HP] OneHpLatencyTieMs`).
+- New 1HP race colours, recoloured from the game's own red HP gauge to fit PTDE instead of flat red/green: **gold** = winner, **silver** = loser, blinking **bronze** = draw, near-**black** = a player not running `mctde-Link` (finish can't be latency-verified).
+
 ## v0.4.8 - SoFresh
 
 - HP bars now blit the game's real HP-gauge texture, baked from your own menu files.

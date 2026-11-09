@@ -655,14 +655,20 @@ void PhantomUnleashedStage2_Restore()
         g_aobThread = nullptr;
     }
 
-    mp::ThreadFreezer freeze;
-
-    EnterCriticalSection(&g_savedLock);
     size_t n = 0;
-    for (auto it = g_saved.rbegin(); it != g_saved.rend(); ++it) {
-        WriteBytes(it->addr, it->orig.data(), it->orig.size());
-        ++n;
+    {
+        mp::ThreadFreezer freeze;
+
+        EnterCriticalSection(&g_savedLock);
+        for (auto it = g_saved.rbegin(); it != g_saved.rend(); ++it) {
+            WriteBytes(it->addr, it->orig.data(), it->orig.size());
+            ++n;
+        }
+        LeaveCriticalSection(&g_savedLock);
     }
+    // Threads are resumed again: the heap frees and logging below must NOT run inside the
+    // freeze window, or a suspended thread holding the heap/log lock deadlocks us.
+    EnterCriticalSection(&g_savedLock);
     g_saved.clear();
     LeaveCriticalSection(&g_savedLock);
 

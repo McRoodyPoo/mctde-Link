@@ -8,6 +8,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <d3d9.h>
+#include <xinput.h>
 #include "D3DOverlay.h"
 #include "PhantomUnleashed.h"
 #include "HideSoulCounter.h"
@@ -599,11 +600,9 @@ static bool g_showLocalMarker = true; // [Overlay] ShowLocalMarker
 static bool g_showDisconnected = true;// [Overlay] ShowDisconnected: keep a "Disconnected" row
                                       // for a player who leaves without dying, until replaced.
 // Spacewar controller-setup instruction panel. Shown by default ([Overlay]
-// ShowControllerSetup=1) until the user presses the hide bind (default Shift+F2),
-// which flips ShowControllerSetup to 0 in the INI so it stays hidden across launches.
+// ShowControllerSetup=1) until the user holds L1+R1+L2+R2 on a controller, which
+// flips ShowControllerSetup to 0 in the INI so it stays hidden across launches.
 static bool g_showControllerSetup = true;
-static int g_controllerSetupHideKey = VK_F2;        // [Overlay] ControllerSetupHideKey (0x71)
-static int g_controllerSetupHideModifier = VK_SHIFT;// [Overlay] ControllerSetupHideModifier (0x10)
 // Master overlay visibility, toggled live by the hotkey. Not persisted to the INI.
 static volatile bool g_overlayVisible = true;
 // Virtual-key code for the master toggle. [Overlay] ToggleKey (default VK_F3 = 0x72).
@@ -1354,27 +1353,8 @@ static void LoadConfig(bool logIt)
     g_showDisconnected = GetPrivateProfileIntA("Overlay", "ShowDisconnected", 1, g_iniPath) != 0;
 
     // Spacewar controller-setup instructions. ShowControllerSetup defaults to 1; the
-    // hide bind (Shift+F2) writes a 0 here so the panel never returns once dismissed.
+    // controller hide combo (L1+R1+L2+R2) writes a 0 here so the panel never returns once dismissed.
     g_showControllerSetup = GetPrivateProfileIntA("Overlay", "ShowControllerSetup", 1, g_iniPath) != 0;
-    {
-        char setupKey[32];
-        ZeroMemory(setupKey, sizeof(setupKey));
-        GetPrivateProfileStringA("Overlay", "ControllerSetupHideKey", "0x71", setupKey, sizeof(setupKey), g_iniPath);
-        TrimString(setupKey);
-        int vk = (int)strtol(setupKey, NULL, 0);
-        if (vk <= 0 || vk > 255)
-            vk = VK_F2;
-        g_controllerSetupHideKey = vk;
-
-        char setupMod[32];
-        ZeroMemory(setupMod, sizeof(setupMod));
-        GetPrivateProfileStringA("Overlay", "ControllerSetupHideModifier", "0x10", setupMod, sizeof(setupMod), g_iniPath);
-        TrimString(setupMod);
-        int mod = (int)strtol(setupMod, NULL, 0);
-        if (mod < 0 || mod > 255)
-            mod = 0;
-        g_controllerSetupHideModifier = mod;
-    }
 
     // Master overlay toggle hotkey. Accepts decimal or hex (e.g. 119 or 0x77) virtual-key codes.
     {
@@ -5694,7 +5674,7 @@ static const char* const kControllerSetupLines[] = {
     "Select Templates at the top",
     "Select Gamepad in the list",
     "Select Apply Configuration at the bottom right",
-    "Press SHIFT + F2 to hide this menu",
+    "Hold L1 + R1 + L2 + R2 to hide this menu",
 };
 static const int kControllerSetupLineCount =
     (int)(sizeof(kControllerSetupLines) / sizeof(kControllerSetupLines[0]));
@@ -7814,6 +7794,65 @@ static DWORD WINAPI OverlayThread(LPVOID)
 // user is alt-tabbed and typing elsewhere.
 static bool ShowSteamControllerBindingPanel();   // defined below, near the nudge thread
 
+// XInput, resolved at runtime so there's no new link dependency. Prefer the copy the
+// game already loaded (xinput1_3 for PTDE) so we see the same pad state Steam Input
+// feeds the game.
+typedef DWORD (WINAPI* XInputGetStateFn)(DWORD, XINPUT_STATE*);
+static XInputGetStateFn ResolveXInputGetState()
+{
+    static XInputGetStateFn fn = NULL;
+    static bool tried = false;
+    if (tried)
+        return fn;
+    tried = true;
+
+    const char* names[] = { "xinput1_3.dll", "xinput1_4.dll", "xinput9_1_0.dll" };
+    HMODULE mod = NULL;
+    for (int i = 0; i < 3 && !mod; i++)
+        mod = GetModuleHandleA(names[i]);
+    for (int i = 0; i < 3 && !mod; i++)
+        mod = LoadLibraryA(names[i]);
+    if (mod)
+        fn = (XInputGetStateFn)GetProcAddress(mod, "XInputGetState");
+    WriteLogf("XInput for controller-setup hide combo: %s", fn ? "resolved" : "unavailable");
+    return fn;
+}
+
+// True when any connected pad holds L1+R1+L2+R2 (LB+RB+LT+RT) at once. Slots that
+// report "not connected" are re-checked about once a second, since polling empty
+// slots in old XInput is slow.
+static bool AnyPadHoldsSetupHideCombo()
+{
+    XInputGetStateFn getState = ResolveXInputGetState();
+    if (!getState)
+        return false;
+
+    static int emptySlotWait[XUSER_MAX_COUNT] = { 0 };
+    for (DWORD i = 0; i < XUSER_MAX_COUNT; i++)
+    {
+        if (emptySlotWait[i] > 0)
+        {
+            emptySlotWait[i]--;
+            continue;
+        }
+
+        XINPUT_STATE st;
+        ZeroMemory(&st, sizeof(st));
+        if (getState(i, &st) != ERROR_SUCCESS)
+        {
+            emptySlotWait[i] = 33;   // ~1s at the 30ms hotkey tick
+            continue;
+        }
+
+        const WORD bumpers = XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER;
+        if ((st.Gamepad.wButtons & bumpers) == bumpers &&
+            st.Gamepad.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD &&
+            st.Gamepad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
+            return true;
+    }
+    return false;
+}
+
 static DWORD WINAPI HotkeyThread(LPVOID)
 {
     WriteLogLine("Hotkey thread started.");
@@ -7848,22 +7887,18 @@ static DWORD WINAPI HotkeyThread(LPVOID)
             bindPrevDown = bd;
         }
 
-        // Controller-setup hide bind (default Shift+F2). On a rising edge it hides the
-        // panel and persists ShowControllerSetup=0 so it stays hidden across launches.
+        // Controller-setup hide combo: L1+R1+L2+R2 held together on any pad. On a rising
+        // edge it hides the panel and persists ShowControllerSetup=0 so it stays hidden
+        // across launches. Pads are only polled while the panel is showing.
         {
-            int setupKey = g_controllerSetupHideKey;
-            if (g_showControllerSetup && setupKey > 0 && setupKey <= 255)
+            if (g_showControllerSetup)
             {
-                bool down = (GetAsyncKeyState(setupKey) & 0x8000) != 0;
-                bool modOk = (g_controllerSetupHideModifier <= 0) ||
-                    ((GetAsyncKeyState(g_controllerSetupHideModifier) & 0x8000) != 0);
-
-                if (down && !setupPrevDown && gameFocused && modOk)
+                bool down = AnyPadHoldsSetupHideCombo();
+                if (down && !setupPrevDown && gameFocused)
                 {
                     g_showControllerSetup = false;
                     WritePrivateProfileStringA("Overlay", "ShowControllerSetup", "0", g_iniPath);
-                    WriteLogf("Controller setup panel hidden via hotkey (vk=0x%02X mod=0x%02X); ShowControllerSetup=0 saved.",
-                        setupKey, g_controllerSetupHideModifier);
+                    WriteLogLine("Controller setup panel hidden via L1+R1+L2+R2; ShowControllerSetup=0 saved.");
                 }
                 setupPrevDown = down;
             }
@@ -8004,11 +8039,16 @@ static DWORD WINAPI WatchdogThread(LPVOID)
 
         if (++goneStreak >= 3)      // ~3s with no game window at all -> game is closing
         {
-            WriteLogLine("Watchdog: game window gone; forcing process exit to avoid a zombie process.");
+            WriteLogLine("Watchdog: game window gone; terminating process to avoid a zombie process.");
             g_running = false;
-            PhantomUnleashed_Restore(); // revert any applied phantom-cap patches before we exit
-            HideSoulCounter_Restore();  // revert the soul-counter patch too
-            ExitProcess(0);
+            // TerminateProcess, NOT ExitProcess, and no patch restore first. The restore path
+            // suspends every other thread (ThreadFreezer) and then allocates/logs; if any
+            // suspended thread holds the heap lock or the log lock, this thread deadlocks and
+            // the exit never happens -- the exact zombie DARKSOULS.exe this watchdog exists to
+            // prevent. ExitProcess has the same class of hazard (DLL detach against threads
+            // that died holding locks). The process is dying, so in-memory patches need no
+            // restore; terminate outright.
+            TerminateProcess(GetCurrentProcess(), 0);
         }
     }
 
@@ -8331,9 +8371,20 @@ extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule)
     g_hInstance = (HINSTANCE)hModule;
 }
 
-extern "C" void McTDE_NetOverlay_OnProcessDetach()
+extern "C" void McTDE_NetOverlay_OnProcessDetach(int processTerminating)
 {
     g_running = false;
+
+    // Process termination (ExitProcess): every other thread is already dead, possibly killed
+    // mid-allocation while owning the heap lock or a critical section. Any teardown below that
+    // touches the heap, a lock, or the log can then deadlock inside ExitProcess and leave a
+    // zombie DARKSOULS.exe holding the Steam session. The image dies with the process, so
+    // there is nothing worth unpatching -- bail out and let the OS reclaim everything.
+    if (processTerminating)
+        return;
+
+    // FreeLibrary while the process lives: our code caves are about to unmap, so the patches
+    // MUST be reverted or the game jumps into freed memory.
     PhantomUnleashed_Restore(); // revert phantom-cap patches so a half-patched image never outlives us
     HideSoulCounter_Restore();  // revert the soul-counter patch so a half-patched image never outlives us
     DisableTruePingTimerPeriod();

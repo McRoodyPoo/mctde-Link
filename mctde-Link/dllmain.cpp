@@ -12,7 +12,7 @@
 
 #ifdef MCTDE_LINK_SINGLE_DLL
 extern "C" void McTDE_NetOverlay_OnProcessAttach(HMODULE hModule);
-extern "C" void McTDE_NetOverlay_OnProcessDetach();
+extern "C" void McTDE_NetOverlay_OnProcessDetach(int processTerminating);
 extern "C" __declspec(dllexport) void initialize_plugin();
 extern "C" void McTDE_VersionChecker_Start();
 #endif
@@ -800,7 +800,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_DETACH)
     {
 #ifdef MCTDE_LINK_SINGLE_DLL
-        McTDE_NetOverlay_OnProcessDetach();
+        // reserved != NULL means the whole process is terminating (ExitProcess), not a
+        // FreeLibrary unload; teardown must do next to nothing in that case (see the
+        // zombie-process note in McTDE_NetOverlay_OnProcessDetach).
+        McTDE_NetOverlay_OnProcessDetach(reserved != NULL);
 #endif
 
         if (g_realD3D9)

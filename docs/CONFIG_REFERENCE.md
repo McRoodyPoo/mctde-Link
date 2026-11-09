@@ -140,11 +140,7 @@ Optional supported key. If present and set to `0`, rows without a learned identi
 
 `ShowControllerSetup=1`
 
-Shows a step-by-step "Spacewar Controller Setup" instruction panel above the player rows (it renders on its own at the main menu, before any players are present). Pressing the hide bind (default Shift+F2, while the game window is focused) hides the panel and writes `ShowControllerSetup=0` here, so the instructions stay hidden on every later launch. Set it back to `1` by hand to bring them back.
-
-`ControllerSetupHideModifier=0x10` / `ControllerSetupHideKey=0x71`
-
-Windows virtual-key codes (decimal or hex) for the panel's hide bind. Defaults are Shift (`0x10`) + F2 (`0x71`). Set the modifier to `0` for a no-modifier bind. The on-screen text always reads "Press SHIFT + F2", so keep these in sync if you rebind.
+Shows a step-by-step "Spacewar Controller Setup" instruction panel above the player rows (it renders on its own at the main menu, before any players are present). Holding L1 + R1 + L2 + R2 on a controller (while the game window is focused) hides the panel and writes `ShowControllerSetup=0` here, so the instructions stay hidden on every later launch. Keyboard players can turn it off from the Shift+F4 settings panel ("Controller setup"). Set it back to `1` by hand to bring them back.
 
 ## HP
 

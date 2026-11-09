@@ -149,28 +149,31 @@ bool PatchEngine::Commit() {
 }
 
 void PatchEngine::RestoreAll() {
-    ThreadFreezer freeze;
-
     size_t restored = 0;
-    // Reverse order so overlapping/adjacent patches unwind cleanly.
-    for (auto it = patches_.rbegin(); it != patches_.rend(); ++it) {
-        Patch& p = *it;
-        if (!p.applied || p.original.empty()) continue;
+    {
+        ThreadFreezer freeze;
 
-        const SIZE_T len = p.original.size();
-        void* addr = reinterpret_cast<void*>(p.address);
+        // Reverse order so overlapping/adjacent patches unwind cleanly.
+        for (auto it = patches_.rbegin(); it != patches_.rend(); ++it) {
+            Patch& p = *it;
+            if (!p.applied || p.original.empty()) continue;
 
-        DWORD oldProt = 0;
-        if (VirtualProtect(addr, len, PAGE_EXECUTE_READWRITE, &oldProt)) {
-            memcpy(addr, p.original.data(), len);
-            DWORD tmp = 0;
-            VirtualProtect(addr, len, oldProt, &tmp);
-            FlushInstructionCache(GetCurrentProcess(), addr, len);
-            p.applied = false;
-            ++restored;
+            const SIZE_T len = p.original.size();
+            void* addr = reinterpret_cast<void*>(p.address);
+
+            DWORD oldProt = 0;
+            if (VirtualProtect(addr, len, PAGE_EXECUTE_READWRITE, &oldProt)) {
+                memcpy(addr, p.original.data(), len);
+                DWORD tmp = 0;
+                VirtualProtect(addr, len, oldProt, &tmp);
+                FlushInstructionCache(GetCurrentProcess(), addr, len);
+                p.applied = false;
+                ++restored;
+            }
         }
     }
-
+    // Log only after the freezer resumes the other threads: Log allocates and takes the
+    // host log lock, and a suspended thread may own either -> deadlock.
     committed_ = false;
     Log("RestoreAll: reverted " + std::to_string(restored) + " patch(es).");
 }

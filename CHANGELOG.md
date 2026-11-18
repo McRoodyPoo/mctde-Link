@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New `[Compatibility] RealD3D9Path`: forward to a different D3D9 DLL instead of the system one, e.g. DXVK renamed to `d3d9_dxvk.dll` to run on Vulkan. Falls back to the system `d3d9.dll` if it can't be used.
+
 ## v0.4.8 - SoFresh
 
 - HP bars now blit the game's real HP-gauge texture, baked from your own menu files.

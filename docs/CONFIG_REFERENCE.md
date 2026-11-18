@@ -16,6 +16,16 @@ Controls normal log output from the hub, overlay, and version checker. Keep this
 
 Names a folder next to `d3d9.dll` that will be scanned for additional DLLs to load. This is for compatibility with other PTDE tools or hook DLLs. The loader skips `d3d9.dll` itself and loads other DLLs in alphabetical order.
 
+`RealD3D9Path=` (empty by default)
+
+The D3D9 implementation mctde-Link forwards to. Empty means the system `d3d9.dll`. Set it to use a different D3D9 DLL, such as **DXVK** (D3D9 on Vulkan), while mctde-Link keeps the `d3d9.dll` slot:
+
+1. Rename DXVK's 32-bit (`x32`) `d3d9.dll` to `d3d9_dxvk.dll`.
+2. Put it in `DATA/` next to mctde-Link's `d3d9.dll` (not in the chainload folder).
+3. Set `RealD3D9Path=d3d9_dxvk.dll`.
+
+Relative paths resolve against the game folder; absolute paths work too. If the file is missing, has no `Direct3DCreate9` export, or is mctde-Link's own `d3d9.dll`, a line is written to the hub log and mctde-Link falls back to the system `d3d9.dll`. Under Proton/Wine leave this empty: there the system `d3d9.dll` already is DXVK.
+
 ## Controller
 
 First-launch helper for the Steam controller binding. Because the mod launches under Steam appid 480 (Spacewar), Steam applies Spacewar's stock "Official Configuration", which maps to inputs no real pad has. As a result, controllers appear dead in-game until you manually apply Steam's **Gamepad** template. The actual config binding is a signed, cloud-synced blob that can't be written from outside Steam, so instead we call Steam's `ShowBindingPanel()` to pop the in-overlay configurator (one step from Browse Configs → Templates → Gamepad). It fires **once per install**, and only when a controller is actually connected (keyboard/mouse users are never nudged). Success is recorded in a marker file (`mctde-link.controller.done`) so it never nags again; delete that file to re-arm it.

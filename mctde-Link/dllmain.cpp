@@ -234,8 +234,74 @@ bool __cdecl print_console(std::string& message)
 }
 
 // ------------------------------------------------------------
-// Load real system d3d9.dll
+// Load the real d3d9.dll we forward to
 // ------------------------------------------------------------
+//
+// Default: the system d3d9.dll (System32 / SysWOW64). [Compatibility] RealD3D9Path can
+// point at a different D3D9 implementation instead -- e.g. DXVK's d3d9.dll renamed to
+// d3d9_dxvk.dll and placed next to this DLL -- so the game renders through Vulkan while
+// mctde-Link still owns the d3d9.dll slot. Relative paths resolve against the game folder.
+// If the configured DLL is missing, is mctde-Link itself, or lacks Direct3DCreate9, we log
+// it and fall back to the system d3d9.dll so the game still starts.
+
+static HMODULE GetOwnModule()
+{
+    HMODULE self = NULL;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCSTR)&GetOwnModule,
+        &self);
+    return self;
+}
+
+static HMODULE TryLoadConfiguredD3D9()
+{
+    std::string iniPath = GetHubIniPath();
+    char configured[MAX_PATH] = { 0 };
+    GetPrivateProfileStringA("Compatibility", "RealD3D9Path", "", configured, MAX_PATH, iniPath.c_str());
+
+    if (configured[0] == '\0')
+    {
+        return NULL;
+    }
+
+    std::string path = ResolveGamePath(configured);
+    HMODULE module = LoadLibraryA(path.c_str());
+
+    if (!module)
+    {
+        DWORD errorCode = GetLastError();
+        std::string message = "Failed to load [Compatibility] RealD3D9Path: ";
+        message += path;
+        message += ". Error code: ";
+        message += std::to_string(errorCode);
+        message += ". Message: ";
+        message += GetWindowsErrorMessage(errorCode);
+        message += " Falling back to system d3d9.dll.";
+        WriteHubLogString(message);
+        return NULL;
+    }
+
+    if (module == GetOwnModule())
+    {
+        // Pointing at ourselves would make Direct3DCreate9 call itself forever.
+        FreeLibrary(module);
+        WriteHubLogString("[Compatibility] RealD3D9Path points at mctde-Link's own d3d9.dll; ignoring it. "
+                          "Rename the other D3D9 DLL (e.g. d3d9_dxvk.dll). Falling back to system d3d9.dll.");
+        return NULL;
+    }
+
+    if (!GetProcAddress(module, "Direct3DCreate9"))
+    {
+        FreeLibrary(module);
+        WriteHubLogString("[Compatibility] RealD3D9Path has no Direct3DCreate9 export: " + path +
+                          ". Falling back to system d3d9.dll.");
+        return NULL;
+    }
+
+    WriteHubLogString("Loaded real d3d9 from [Compatibility] RealD3D9Path: " + path);
+    return module;
+}
 
 void LoadRealD3D9()
 {
@@ -244,32 +310,37 @@ void LoadRealD3D9()
         return;
     }
 
-    char systemPath[MAX_PATH] = { 0 };
-
-    if (GetSystemDirectoryA(systemPath, MAX_PATH) == 0)
-    {
-        WriteHubLog("GetSystemDirectoryA failed.");
-        return;
-    }
-
-    std::string realPath = std::string(systemPath) + "\\d3d9.dll";
-
-    g_realD3D9 = LoadLibraryA(realPath.c_str());
+    g_realD3D9 = TryLoadConfiguredD3D9();
 
     if (!g_realD3D9)
     {
-        DWORD errorCode = GetLastError();
+        char systemPath[MAX_PATH] = { 0 };
 
-        std::string message = "Failed to load real system d3d9.dll. Error code: ";
-        message += std::to_string(errorCode);
-        message += ". Message: ";
-        message += GetWindowsErrorMessage(errorCode);
+        if (GetSystemDirectoryA(systemPath, MAX_PATH) == 0)
+        {
+            WriteHubLog("GetSystemDirectoryA failed.");
+            return;
+        }
 
-        WriteHubLogString(message);
-        return;
+        std::string realPath = std::string(systemPath) + "\\d3d9.dll";
+
+        g_realD3D9 = LoadLibraryA(realPath.c_str());
+
+        if (!g_realD3D9)
+        {
+            DWORD errorCode = GetLastError();
+
+            std::string message = "Failed to load real system d3d9.dll. Error code: ";
+            message += std::to_string(errorCode);
+            message += ". Message: ";
+            message += GetWindowsErrorMessage(errorCode);
+
+            WriteHubLogString(message);
+            return;
+        }
+
+        WriteHubLog("Loaded real system d3d9.dll.");
     }
-
-    WriteHubLog("Loaded real system d3d9.dll.");
 
     g_realDirect3DCreate9 =
         (Direct3DCreate9_t)GetProcAddress(g_realD3D9, "Direct3DCreate9");

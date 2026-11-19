@@ -2,4 +2,4 @@ mctde=0.88
 mctde-link=0.4.8
 mctde-launcher=0.5.4
 mctde-installer=0.1.10
-mctde-installer-linux=0.3.2
+mctde-installer-linux=0.3.3

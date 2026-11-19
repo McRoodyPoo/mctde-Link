@@ -305,14 +305,19 @@ static HMODULE TryLoadConfiguredD3D9()
 
 void LoadRealD3D9()
 {
-    if (g_realD3D9)
+    // Called from both HubThread and the game's main thread (Direct3DCreate9), which can race.
+    // Publish g_realD3D9 LAST, after the function pointers, so a thread that sees it non-NULL
+    // never reads a NULL Direct3DCreate9 (that made the game's D3D init fail). No lock: a lock
+    // held across LoadLibrary can deadlock against the loader lock. If two threads both load,
+    // the loser drops its extra reference; both resolved the same module and pointers.
+    if (InterlockedCompareExchangePointer((PVOID volatile*)&g_realD3D9, NULL, NULL))
     {
         return;
     }
 
-    g_realD3D9 = TryLoadConfiguredD3D9();
+    HMODULE module = TryLoadConfiguredD3D9();
 
-    if (!g_realD3D9)
+    if (!module)
     {
         char systemPath[MAX_PATH] = { 0 };
 
@@ -324,9 +329,9 @@ void LoadRealD3D9()
 
         std::string realPath = std::string(systemPath) + "\\d3d9.dll";
 
-        g_realD3D9 = LoadLibraryA(realPath.c_str());
+        module = LoadLibraryA(realPath.c_str());
 
-        if (!g_realD3D9)
+        if (!module)
         {
             DWORD errorCode = GetLastError();
 
@@ -342,18 +347,28 @@ void LoadRealD3D9()
         WriteHubLog("Loaded real system d3d9.dll.");
     }
 
-    g_realDirect3DCreate9 =
-        (Direct3DCreate9_t)GetProcAddress(g_realD3D9, "Direct3DCreate9");
+    Direct3DCreate9_t create9 =
+        (Direct3DCreate9_t)GetProcAddress(module, "Direct3DCreate9");
 
-    g_realDirect3DCreate9Ex =
-        (Direct3DCreate9Ex_t)GetProcAddress(g_realD3D9, "Direct3DCreate9Ex");
+    Direct3DCreate9Ex_t create9Ex =
+        (Direct3DCreate9Ex_t)GetProcAddress(module, "Direct3DCreate9Ex");
 
-    if (g_realDirect3DCreate9)
+    g_realDirect3DCreate9 = create9;
+    g_realDirect3DCreate9Ex = create9Ex;
+
+    if (InterlockedCompareExchangePointer((PVOID volatile*)&g_realD3D9, module, NULL) != NULL)
+    {
+        // Another thread published first; keep its handle and drop our extra reference.
+        FreeLibrary(module);
+        return;
+    }
+
+    if (create9)
         WriteHubLog("Found Direct3DCreate9.");
     else
         WriteHubLog("Could not find Direct3DCreate9.");
 
-    if (g_realDirect3DCreate9Ex)
+    if (create9Ex)
         WriteHubLog("Found Direct3DCreate9Ex.");
     else
         WriteHubLog("Could not find Direct3DCreate9Ex.");
@@ -874,7 +889,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         McTDE_NetOverlay_OnProcessDetach();
 #endif
 
-        if (g_realD3D9)
+        // reserved != NULL means the process is terminating: other threads (DXVK's workers
+        // included) are already gone and the loader will detach the real d3d9 itself. Calling
+        // FreeLibrary here would run its teardown against dead threads and can hang or crash
+        // on exit. Only free it on a real dynamic unload.
+        if (g_realD3D9 && reserved == NULL)
         {
             FreeLibrary(g_realD3D9);
             g_realD3D9 = NULL;

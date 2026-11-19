@@ -41,3 +41,6 @@ companion/bin/
 
 # Keep the checked-in release DLL intentionally.
 !dist/d3d9.dll
+
+# Release packaging output (tools/package_release.sh)
+dist/*/

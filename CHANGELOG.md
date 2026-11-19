@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- On Linux (Proton) an out-of-date mctde-Link no longer closes the game for an update that can't run there (the updater's PowerShell helper doesn't exist under Proton); the launcher updates Link when it next opens instead. The "install the launcher" prompt also counts the native Linux launcher as installed.
 - New `[Compatibility] RealD3D9Path`: forward to a different D3D9 DLL instead of the system one, e.g. DXVK renamed to `d3d9_dxvk.dll` to run on Vulkan. Falls back to the system `d3d9.dll` if it can't be used.
 
 ## v0.4.8 - SoFresh

@@ -943,8 +943,24 @@ static std::string Sha256Hex(const std::string& data)
     return out;
 }
 
+// True when running under Wine/Proton, i.e. on Linux: ntdll exports wine_get_version there.
+// (Same test as PhantomUnleashed.cpp's, whose copy is file-local.)
+static bool RunningUnderWine()
+{
+    HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+    return ntdll && GetProcAddress(ntdll, "wine_get_version") != nullptr;
+}
+
+static bool FileExistsA(const std::string& path)
+{
+    DWORD attr = GetFileAttributesA(path.c_str());
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 // If the launcher is missing (and the game wasn't started by it), offer to download it from
 // the official GitHub release over HTTPS, verify it, install it, and open it. Consent-gated.
+// On Linux this fetches the Windows launcher too: it runs under Proton, and the native Linux
+// launcher can't be installed from inside Wine (the file would land without its executable bit).
 static void OfferLauncherInstall()
 {
     char env[8] = { 0 };
@@ -959,9 +975,10 @@ static void OfferLauncherInstall()
     if (!dir.empty() && dir[dir.size() - 1] != '\\' && dir[dir.size() - 1] != '/') dir += "\\";
     std::string launcherPath = dir + "mctde_launcher.exe";
 
-    DWORD attr = GetFileAttributesA(launcherPath.c_str());
-    if (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY))
+    if (FileExistsA(launcherPath))
         return;   // already installed -- the launcher guard handles enforcement
+    if (RunningUnderWine() && FileExistsA(dir + "mctde-launcher"))
+        return;   // Linux: the native launcher is installed (it starts the game through Proton)
 
     int r = MessageBoxA(NULL,
         "The mctde launcher isn't installed yet.\n\n"
@@ -1109,6 +1126,18 @@ DWORD WINAPI VersionCheckThread(LPVOID)
 
     // mctde-Link auto-update.
     WriteLog("mctde-link update available.");
+
+    // Linux (Proton): the in-game updater swaps d3d9.dll with a PowerShell helper, and Proton has
+    // no working PowerShell, so it can't run here. Both launchers (Windows under Proton, and the
+    // native Linux one) update mctde-Link when they open, before starting the game (with
+    // Auto-Update on, the default), so leave it to them instead of closing the game for an update
+    // that would fail.
+    if (RunningUnderWine())
+    {
+        WriteLog("Proton/Wine detected: leaving the mctde-Link update to the launcher (it updates "
+                 "Link on its next start).");
+        return 0;
+    }
 
     std::string popupMessage =
         "A new version of mctde-Link is available.\n\n"

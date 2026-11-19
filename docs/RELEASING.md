@@ -57,28 +57,46 @@ helper that waits for the game to exit, swaps the files, relaunches, and self-de
 5. **Update `latest.txt` on `main`** so `mctde-link=` matches the new version. This is
    what makes already-installed clients prompt.
 
+Steps 3 and 4 are what `tools/package_release.sh` does for you (see Packaging below).
+
 > ⚠️ If a release is missing the `mctde-Link.zip` asset, auto-update gets a 404 and
 > falls back to opening the releases page (graceful, but no auto-install).
 
-### If the installer changed (mctde-Installer)
+### Packaging
 
-The standalone installer (`../mctde-Installer`) self-updates the same way: on launch
-it reads `mctde-installer=` from `latest.txt` and, if a newer version exists, downloads
-the new exe, swaps itself out, and relaunches. To ship an installer update:
+`tools/package_release.sh X.Y.Z` builds `dist/X.Y.Z/mctde-Link.zip` (+ `.sha256`) from
+`Release/d3d9.dll` and `INPUT_DLL=<path to the 32-bit steam_api.dll>`, adding
+`mctde-link.ini` (from `samples/mctde-link.sample.ini`), `README.md` and `CHANGELOG.md`. It refuses
+to run unless `CURRENT_MCTDE_LINK_VERSION`, `version.rc`'s FILEVERSION and a `## vX.Y.Z` changelog
+heading all say X.Y.Z, and both dlls are 32-bit, so a release can't go out missing a file again
+(0.4.8 shipped without `mctde_input.dll`).
 
-1. **Bump `kInstallerVersion`** in `mctde-Installer/src/Update.cpp`.
-2. **Build it** (`mctde-Installer/build_gui.bat`). Output: `build/mctde-Installer.exe`.
-3. **Create a release in the `mctde-Installer` repo** (tagged `vX.Y.Z`) and **attach
-   `mctde-Installer.exe`** (exact name). The self-update fetches it from
-   `github.com/McRoodyPoo/mctde-Installer/releases/latest/download/mctde-Installer.exe`.
-4. **Bump `mctde-installer=` in this repo's `latest.txt`** to match `kInstallerVersion`
-   (the installer reads its version from the central `latest.txt` here, but pulls the
-   binary from the mctde-Installer repo above).
+### Linux (Proton)
 
-> ⚠️ If a release is missing the `mctde-Installer.exe` asset, the self-update download
-> fails its PE check and the installer just keeps running the current version (safe, but
-> no auto-update). Keep `kInstallerVersion` and the `latest.txt` line equal so users on
-> the newest build aren't re-prompted.
+The same zip serves Linux: `d3d9.dll` runs inside Proton. The in-game updater can't swap the dll
+there (its helper is PowerShell, which Proton lacks), so under Wine/Proton it leaves the update to
+the launcher instead of closing the game. Both launchers (Windows under Proton, native Linux)
+replace `d3d9.dll` from `mctde-Link.zip` when they open, with Auto-Update on.
+
+---
+
+## latest.txt: who reads what
+
+`latest.txt` on `main` is the one manifest for the whole project. Versions are shared by Windows
+and Linux; each updater picks the download for the OS it runs on.
+
+| Key | Read by | Downloads |
+|---|---|---|
+| `mctde=` | in-game checker | opens the NexusMods page |
+| `mctde-link=` | in-game checker, both launchers | `mctde-Link.zip` from this repo's latest release |
+| `mctde-launcher=` | both launchers, installer (Linux launcher step) | `mctde-launcher-windows.zip` / `mctde-launcher-linux.zip` from mctde-Launcher's `v<ver>` release |
+| `mctde-installer=` | installer | `mctde-Installer-windows.zip` / `mctde-Installer-linux.zip` from mctde-Installer's `v<ver>` release |
+| `mctde-installer-linux=` | Linux installers older than 0.4.0 | keep equal to `mctde-installer=` |
+
+Linux launchers older than 0.6.0 read a separate manifest from mctde-Launcher's `linux` branch;
+mctde-Launcher's `tools/package_release.sh` regenerates it. Release order for any component:
+publish the GitHub release (with every asset its script lists) **first**, then bump its line here.
+Each repo's `tools/package_release.sh` prints its own exact steps.
 
 ---
 

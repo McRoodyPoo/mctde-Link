@@ -234,55 +234,141 @@ bool __cdecl print_console(std::string& message)
 }
 
 // ------------------------------------------------------------
-// Load real system d3d9.dll
+// Load the real d3d9.dll we forward to
 // ------------------------------------------------------------
+//
+// Default: the system d3d9.dll (System32 / SysWOW64). [Compatibility] RealD3D9Path can
+// point at a different D3D9 implementation instead -- e.g. DXVK's d3d9.dll renamed to
+// d3d9_dxvk.dll and placed next to this DLL -- so the game renders through Vulkan while
+// mctde-Link still owns the d3d9.dll slot. Relative paths resolve against the game folder.
+// If the configured DLL is missing, is mctde-Link itself, or lacks Direct3DCreate9, we log
+// it and fall back to the system d3d9.dll so the game still starts.
 
-void LoadRealD3D9()
+static HMODULE GetOwnModule()
 {
-    if (g_realD3D9)
+    HMODULE self = NULL;
+    GetModuleHandleExA(
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        (LPCSTR)&GetOwnModule,
+        &self);
+    return self;
+}
+
+static HMODULE TryLoadConfiguredD3D9()
+{
+    std::string iniPath = GetHubIniPath();
+    char configured[MAX_PATH] = { 0 };
+    GetPrivateProfileStringA("Compatibility", "RealD3D9Path", "", configured, MAX_PATH, iniPath.c_str());
+
+    if (configured[0] == '\0')
     {
-        return;
+        return NULL;
     }
 
-    char systemPath[MAX_PATH] = { 0 };
+    std::string path = ResolveGamePath(configured);
+    HMODULE module = LoadLibraryA(path.c_str());
 
-    if (GetSystemDirectoryA(systemPath, MAX_PATH) == 0)
-    {
-        WriteHubLog("GetSystemDirectoryA failed.");
-        return;
-    }
-
-    std::string realPath = std::string(systemPath) + "\\d3d9.dll";
-
-    g_realD3D9 = LoadLibraryA(realPath.c_str());
-
-    if (!g_realD3D9)
+    if (!module)
     {
         DWORD errorCode = GetLastError();
-
-        std::string message = "Failed to load real system d3d9.dll. Error code: ";
+        std::string message = "Failed to load [Compatibility] RealD3D9Path: ";
+        message += path;
+        message += ". Error code: ";
         message += std::to_string(errorCode);
         message += ". Message: ";
         message += GetWindowsErrorMessage(errorCode);
-
+        message += " Falling back to system d3d9.dll.";
         WriteHubLogString(message);
+        return NULL;
+    }
+
+    if (module == GetOwnModule())
+    {
+        // Pointing at ourselves would make Direct3DCreate9 call itself forever.
+        FreeLibrary(module);
+        WriteHubLogString("[Compatibility] RealD3D9Path points at mctde-Link's own d3d9.dll; ignoring it. "
+                          "Rename the other D3D9 DLL (e.g. d3d9_dxvk.dll). Falling back to system d3d9.dll.");
+        return NULL;
+    }
+
+    if (!GetProcAddress(module, "Direct3DCreate9"))
+    {
+        FreeLibrary(module);
+        WriteHubLogString("[Compatibility] RealD3D9Path has no Direct3DCreate9 export: " + path +
+                          ". Falling back to system d3d9.dll.");
+        return NULL;
+    }
+
+    WriteHubLogString("Loaded real d3d9 from [Compatibility] RealD3D9Path: " + path);
+    return module;
+}
+
+void LoadRealD3D9()
+{
+    // Called from both HubThread and the game's main thread (Direct3DCreate9), which can race.
+    // Publish g_realD3D9 LAST, after the function pointers, so a thread that sees it non-NULL
+    // never reads a NULL Direct3DCreate9 (that made the game's D3D init fail). No lock: a lock
+    // held across LoadLibrary can deadlock against the loader lock. If two threads both load,
+    // the loser drops its extra reference; both resolved the same module and pointers.
+    if (InterlockedCompareExchangePointer((PVOID volatile*)&g_realD3D9, NULL, NULL))
+    {
         return;
     }
 
-    WriteHubLog("Loaded real system d3d9.dll.");
+    HMODULE module = TryLoadConfiguredD3D9();
 
-    g_realDirect3DCreate9 =
-        (Direct3DCreate9_t)GetProcAddress(g_realD3D9, "Direct3DCreate9");
+    if (!module)
+    {
+        char systemPath[MAX_PATH] = { 0 };
 
-    g_realDirect3DCreate9Ex =
-        (Direct3DCreate9Ex_t)GetProcAddress(g_realD3D9, "Direct3DCreate9Ex");
+        if (GetSystemDirectoryA(systemPath, MAX_PATH) == 0)
+        {
+            WriteHubLog("GetSystemDirectoryA failed.");
+            return;
+        }
 
-    if (g_realDirect3DCreate9)
+        std::string realPath = std::string(systemPath) + "\\d3d9.dll";
+
+        module = LoadLibraryA(realPath.c_str());
+
+        if (!module)
+        {
+            DWORD errorCode = GetLastError();
+
+            std::string message = "Failed to load real system d3d9.dll. Error code: ";
+            message += std::to_string(errorCode);
+            message += ". Message: ";
+            message += GetWindowsErrorMessage(errorCode);
+
+            WriteHubLogString(message);
+            return;
+        }
+
+        WriteHubLog("Loaded real system d3d9.dll.");
+    }
+
+    Direct3DCreate9_t create9 =
+        (Direct3DCreate9_t)GetProcAddress(module, "Direct3DCreate9");
+
+    Direct3DCreate9Ex_t create9Ex =
+        (Direct3DCreate9Ex_t)GetProcAddress(module, "Direct3DCreate9Ex");
+
+    g_realDirect3DCreate9 = create9;
+    g_realDirect3DCreate9Ex = create9Ex;
+
+    if (InterlockedCompareExchangePointer((PVOID volatile*)&g_realD3D9, module, NULL) != NULL)
+    {
+        // Another thread published first; keep its handle and drop our extra reference.
+        FreeLibrary(module);
+        return;
+    }
+
+    if (create9)
         WriteHubLog("Found Direct3DCreate9.");
     else
         WriteHubLog("Could not find Direct3DCreate9.");
 
-    if (g_realDirect3DCreate9Ex)
+    if (create9Ex)
         WriteHubLog("Found Direct3DCreate9Ex.");
     else
         WriteHubLog("Could not find Direct3DCreate9Ex.");
@@ -806,7 +892,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved)
         McTDE_NetOverlay_OnProcessDetach(reserved != NULL);
 #endif
 
-        if (g_realD3D9)
+        // reserved != NULL means the process is terminating: other threads (DXVK's workers
+        // included) are already gone and the loader will detach the real d3d9 itself. Calling
+        // FreeLibrary here would run its teardown against dead threads and can hang or crash
+        // on exit. Only free it on a real dynamic unload.
+        if (g_realD3D9 && reserved == NULL)
         {
             FreeLibrary(g_realD3D9);
             g_realD3D9 = NULL;

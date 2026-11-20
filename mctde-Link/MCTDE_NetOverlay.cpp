@@ -619,6 +619,31 @@ static bool g_showControllerSetup = true;
 // Which input the player used last, so the panel's "hide" line names the right bind: controller
 // (hold LB+RB+LT+RT) or keyboard/mouse (Shift+F2). Set by the hotkey thread while the game is focused.
 static volatile bool g_setupInputPad = false;
+// Keyboard bind that hides the panel: [Overlay] ControllerSetupHideKey / ControllerSetupHideModifier
+// (defaults F2 / Shift, as documented since 0.4.6). g_setupHideKbmLine is the panel text naming it.
+static int  g_setupHideKey = VK_F2;
+static int  g_setupHideModifier = VK_SHIFT;
+static char g_setupHideKbmLine[80] = "Press SHIFT + F2 to hide this menu";
+static void SetupKeyName(int vk, char* out, int cap)
+{
+    if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) { lstrcpynA(out, "SHIFT", cap); return; }
+    if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL) { lstrcpynA(out, "CTRL", cap); return; }
+    if (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) { lstrcpynA(out, "ALT", cap); return; }
+    if (vk >= VK_F1 && vk <= VK_F24) { wsprintfA(out, "F%d", vk - VK_F1 + 1); return; }
+    if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) { wsprintfA(out, "%c", (char)vk); return; }
+    // Anything else: ask Windows for the key's name, else show the code.
+    UINT sc = MapVirtualKeyA((UINT)vk, MAPVK_VK_TO_VSC);
+    char n[32] = {0};
+    if (sc && GetKeyNameTextA((LONG)(sc << 16), n, sizeof(n)) > 0) { CharUpperA(n); lstrcpynA(out, n, cap); return; }
+    wsprintfA(out, "KEY 0x%02X", vk);
+}
+static void BuildSetupHideKbmLine()
+{
+    char k[40], m[16];
+    SetupKeyName(g_setupHideKey, k, sizeof(k));
+    if (g_setupHideModifier) { SetupKeyName(g_setupHideModifier, m, sizeof(m)); wsprintfA(g_setupHideKbmLine, "Press %s + %s to hide this menu", m, k); }
+    else wsprintfA(g_setupHideKbmLine, "Press %s to hide this menu", k);
+}
 // Master overlay visibility, toggled live by the hotkey. Not persisted to the INI.
 static volatile bool g_overlayVisible = true;
 // Virtual-key code for the master toggle. [Overlay] ToggleKey (default VK_F3 = 0x72).
@@ -1371,6 +1396,20 @@ static void LoadConfig(bool logIt)
     // Spacewar controller-setup instructions. ShowControllerSetup defaults to 1; the
     // controller hide combo (L1+R1+L2+R2) writes a 0 here so the panel never returns once dismissed.
     g_showControllerSetup = GetPrivateProfileIntA("Overlay", "ShowControllerSetup", 1, g_iniPath) != 0;
+    {
+        char buf[32];
+        ZeroMemory(buf, sizeof(buf));
+        GetPrivateProfileStringA("Overlay", "ControllerSetupHideKey", "0x71", buf, sizeof(buf), g_iniPath);
+        TrimString(buf);
+        int vk = (int)strtol(buf, NULL, 0);
+        g_setupHideKey = (vk > 0 && vk <= 255) ? vk : VK_F2;
+        ZeroMemory(buf, sizeof(buf));
+        GetPrivateProfileStringA("Overlay", "ControllerSetupHideModifier", "0x10", buf, sizeof(buf), g_iniPath);
+        TrimString(buf);
+        int mod = (int)strtol(buf, NULL, 0);
+        g_setupHideModifier = (mod >= 0 && mod <= 255) ? mod : 0;
+        BuildSetupHideKbmLine();
+    }
 
     // Master overlay toggle hotkey. Accepts decimal or hex (e.g. 119 or 0x77) virtual-key codes.
     {
@@ -5696,7 +5735,6 @@ static const int kControllerSetupLineCount =
     (int)(sizeof(kControllerSetupLines) / sizeof(kControllerSetupLines[0]));
 
 // Last line: how to hide the panel, for whichever input the player is using.
-static const char* const kSetupHideKbm  = "Press SHIFT + F2 to hide this menu";
 static const char* const kSetupHidePad  = "Hold LB + RB + LT + RT to hide this menu";   // text fallback
 static const char* const kSetupHideHold = "Hold ";
 static const char* const kSetupHideTail = " to hide this menu";
@@ -5704,7 +5742,7 @@ static const int kSetupHideIcons[4] = { ICON_BTN_LB, ICON_BTN_RB, ICON_BTN_LT, I
 static const char* ControllerSetupLine(int i)
 {
     if (i == kControllerSetupLineCount - 1)
-        return g_setupInputPad ? kSetupHidePad : kSetupHideKbm;
+        return g_setupInputPad ? kSetupHidePad : g_setupHideKbmLine;
     return kControllerSetupLines[i];
 }
 // The game's own LB/RB/LT/RT art can replace the text only in Classic Font mode (icons composite in
@@ -8048,12 +8086,13 @@ static DWORD WINAPI HotkeyThread(LPVOID)
                 }
                 setupPrevDown = down;
 
-                bool kbHide = (GetAsyncKeyState(VK_SHIFT) & 0x8000) && (GetAsyncKeyState(VK_F2) & 0x8000);
+                bool kbHide = (GetAsyncKeyState(g_setupHideKey) & 0x8000) &&
+                              (g_setupHideModifier == 0 || (GetAsyncKeyState(g_setupHideModifier) & 0x8000));
                 if (kbHide && !setupKbPrevDown && gameFocused && g_showControllerSetup)
                 {
                     g_showControllerSetup = false;
                     WritePrivateProfileStringA("Overlay", "ShowControllerSetup", "0", g_iniPath);
-                    WriteLogLine("Controller setup panel hidden via Shift+F2; ShowControllerSetup=0 saved.");
+                    WriteLogLine("Controller setup panel hidden via the keyboard bind; ShowControllerSetup=0 saved.");
                 }
                 setupKbPrevDown = kbHide;
             }

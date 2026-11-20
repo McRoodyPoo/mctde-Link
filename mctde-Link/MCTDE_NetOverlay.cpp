@@ -7968,7 +7968,8 @@ static DWORD WINAPI HotkeyThread(LPVOID)
     bool prevDown = false;
     bool setupPrevDown = false;
     bool setupKbPrevDown = false;     // Shift+F2 edge
-    bool setupDeviceInit = false;     // first poll seeds controller vs keyboard from pad presence
+    bool setupInputSeen = false;      // any deliberate input yet? until then the hint follows pad presence
+    bool setupPadSeen = false;        // last logged pad presence
     DWORD lastPadTick = 0;
     // Optional manual trigger for the Steam controller binding panel (0 = off).
     int bindKey = GetPrivateProfileIntA("Controller", "BindingNudgeKey", 0, g_iniPath);
@@ -8008,10 +8009,10 @@ static DWORD WINAPI HotkeyThread(LPVOID)
             {
                 bool padActive = false, padConnected = false;
                 bool down = PollPadsForSetup(&padActive, &padConnected);
-                if (!setupDeviceInit)
+                if (padConnected != setupPadSeen)
                 {
-                    g_setupInputPad = padConnected;   // start on the controller bind if a pad is present
-                    setupDeviceInit = true;
+                    setupPadSeen = padConnected;
+                    WriteLogLine(padConnected ? "Setup panel: XInput pad connected." : "Setup panel: no XInput pad.");
                 }
                 if (gameFocused)
                 {
@@ -8019,16 +8020,26 @@ static DWORD WINAPI HotkeyThread(LPVOID)
                     if (padActive)
                     {
                         lastPadTick = nowTick;
+                        setupInputSeen = true;
                         if (!g_setupInputPad) { g_setupInputPad = true; WriteLogLine("Setup panel: controller input -> showing LB+RB+LT+RT."); }
                     }
                     // Keyboard/mouse only wins after the pad has been idle ~1s, so Steam Input's
                     // keyboard/mouse emulation of a pad can't flip the hint back and forth.
-                    else if (g_setupInputPad && nowTick - lastPadTick > 1000 && KbmActivity())
+                    else if (nowTick - lastPadTick > 1000 && KbmActivity())
                     {
-                        g_setupInputPad = false;
-                        WriteLogLine("Setup panel: keyboard/mouse input -> showing Shift+F2.");
+                        setupInputSeen = true;
+                        if (g_setupInputPad)
+                        {
+                            g_setupInputPad = false;
+                            WriteLogLine("Setup panel: keyboard/mouse input -> showing Shift+F2.");
+                        }
                     }
                 }
+                // Until the player actually uses an input, follow pad presence: Proton/Wine can take a
+                // few seconds after launch to expose the controller, so a one-shot check at startup
+                // would wrongly settle on the keyboard bind.
+                if (!setupInputSeen)
+                    g_setupInputPad = padConnected;
                 if (down && !setupPrevDown && gameFocused)
                 {
                     g_showControllerSetup = false;

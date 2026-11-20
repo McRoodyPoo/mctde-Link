@@ -75,12 +75,17 @@ static std::vector<uint8_t> g_iconBlob;
 static int g_iconSz = 0, g_iconCount = 0;
 static std::vector<size_t> g_iconOff;     // byte offset of each icon's RGBA (R,G,B,A) in the blob
 static bool g_iconsReady = false;
-struct DsIconCmd { int idx, x, y, size; };
+struct DsIconCmd { int idx, x, y, size, w = 0; };   // w = 0: square (size x size), else w x size
 static std::vector<DsIconCmd> g_dsIconCmds;   // deferred like text, composited after the color-key pass
 // Icon indices past the 8 covenant icons (0-7): host role + own-row marker.
 static const int ICON_HOST_HUMAN   = 8;   // Twin Humanities / Split Humanity -> human host
 static const int ICON_HOST_HOLLOW  = 9;   // Humanity                         -> hollow host
 static const int ICON_LOCAL_MARKER = 10;  // white circlet ring               -> own row marker
+// The game's own Xbox 360 shoulder/trigger labels (menu Menu11 "LB<" ">RB" "LT<" ">RT" tab hints,
+// arrows cropped off), baked at native size (non-square). Present in caches from launcher 0.6.0+;
+// older caches stop at index 10, so callers check g_iconCount and fall back to text.
+static const int ICON_BTN_LB = 11, ICON_BTN_RB = 12, ICON_BTN_LT = 13, ICON_BTN_RT = 14;
+static std::vector<int> g_iconW, g_iconH;   // per-icon pixel size (square covenant icons, wider button labels)
 
 static void LoadIcons(const std::wstring& path){
     if(g_iconsReady) return;
@@ -93,25 +98,32 @@ static void LoadIcons(const std::wstring& path){
     if(!ok || memcmp(g_iconBlob.data(),"MCTDEICO",8)!=0){ g_iconBlob.clear(); return; }
     g_iconSz    = g_iconBlob[16] | (g_iconBlob[17]<<8);
     g_iconCount = g_iconBlob[18] | (g_iconBlob[19]<<8);
-    size_t p=20; g_iconOff.clear();
+    size_t p=20; g_iconOff.clear(); g_iconW.clear(); g_iconH.clear();
     for(int i=0;i<g_iconCount;++i){
         if(p+4>g_iconBlob.size()){ g_iconOff.clear(); return; }
         int w=g_iconBlob[p]|(g_iconBlob[p+1]<<8), hh=g_iconBlob[p+2]|(g_iconBlob[p+3]<<8);
-        g_iconOff.push_back(p+4); p += 4 + (size_t)w*hh*4;
+        g_iconOff.push_back(p+4); g_iconW.push_back(w); g_iconH.push_back(hh); p += 4 + (size_t)w*hh*4;
         if(p>g_iconBlob.size()){ g_iconOff.clear(); return; }
     }
     g_iconsReady = (g_iconCount>0 && g_iconSz>0);
 }
 
-// Blit icon idx scaled to size x size at (x,y) into the BGRA render target (straight-alpha src-over).
-static void BlitIconRT(int idx, int x, int y, int size){
-    if(!g_iconsReady || idx<0 || idx>=g_iconCount || size<=0 || !g_rtBits) return;
-    const uint8_t* ic = &g_iconBlob[g_iconOff[idx]]; int S=g_iconSz;
-    for(int dy=0;dy<size;++dy) for(int dx=0;dx<size;++dx){
-        float sx=(dx+0.5f)*S/size-0.5f, sy=(dy+0.5f)*S/size-0.5f;
+// Width an icon gets when drawn at height h, keeping its aspect (square icons -> h).
+static int IconWidthAt(int idx, int h){
+    if(!g_iconsReady || idx<0 || idx>=g_iconCount || idx>=(int)g_iconW.size() || g_iconH[idx]<=0) return h;
+    return (g_iconW[idx]*h + g_iconH[idx]/2) / g_iconH[idx];
+}
+// Blit icon idx scaled to dw x dh at (x,y) into the BGRA render target (straight-alpha src-over).
+static void BlitIconRT(int idx, int x, int y, int dw, int dh){
+    if(!g_iconsReady || idx<0 || idx>=g_iconCount || dw<=0 || dh<=0 || !g_rtBits) return;
+    const uint8_t* ic = &g_iconBlob[g_iconOff[idx]];
+    const int SW = (idx<(int)g_iconW.size()) ? g_iconW[idx] : g_iconSz;
+    const int SH = (idx<(int)g_iconH.size()) ? g_iconH[idx] : g_iconSz;
+    for(int dy=0;dy<dh;++dy) for(int dx=0;dx<dw;++dx){
+        float sx=(dx+0.5f)*SW/dw-0.5f, sy=(dy+0.5f)*SH/dh-0.5f;
         int x0=(sx>=0)?(int)sx:(int)sx-1, y0=(sy>=0)?(int)sy:(int)sy-1;
         float fx=sx-x0, fy=sy-y0;
-        auto smp=[&](int xx,int yy,int c)->float{ if(xx<0)xx=0; if(yy<0)yy=0; if(xx>=S)xx=S-1; if(yy>=S)yy=S-1; return (float)ic[(yy*S+xx)*4+c]; };
+        auto smp=[&](int xx,int yy,int c)->float{ if(xx<0)xx=0; if(yy<0)yy=0; if(xx>=SW)xx=SW-1; if(yy>=SH)yy=SH-1; return (float)ic[(yy*SW+xx)*4+c]; };
         float rr[4]; for(int c=0;c<4;++c){ float t=smp(x0,y0,c)*(1-fx)+smp(x0+1,y0,c)*fx, b=smp(x0,y0+1,c)*(1-fx)+smp(x0+1,y0+1,c)*fx; rr[c]=t*(1-fy)+b*fy; }
         float al=rr[3]/255.0f; if(al<=0.003f) continue;
         int X=x+dx, Y=y+dy; if(X<0||Y<0||X>=g_rtW||Y>=g_rtH) continue;
@@ -600,9 +612,13 @@ static bool g_showLocalMarker = true; // [Overlay] ShowLocalMarker
 static bool g_showDisconnected = true;// [Overlay] ShowDisconnected: keep a "Disconnected" row
                                       // for a player who leaves without dying, until replaced.
 // Spacewar controller-setup instruction panel. Shown by default ([Overlay]
-// ShowControllerSetup=1) until the user holds L1+R1+L2+R2 on a controller, which
-// flips ShowControllerSetup to 0 in the INI so it stays hidden across launches.
+// ShowControllerSetup=1) until the user holds L1+R1+L2+R2 on a controller or presses
+// Shift+F2 on the keyboard, which flips ShowControllerSetup to 0 in the INI so it stays
+// hidden across launches.
 static bool g_showControllerSetup = true;
+// Which input the player used last, so the panel's "hide" line names the right bind: controller
+// (hold LB+RB+LT+RT) or keyboard/mouse (Shift+F2). Set by the hotkey thread while the game is focused.
+static volatile bool g_setupInputPad = false;
 // Master overlay visibility, toggled live by the hotkey. Not persisted to the INI.
 static volatile bool g_overlayVisible = true;
 // Virtual-key code for the master toggle. [Overlay] ToggleKey (default VK_F3 = 0x72).
@@ -5674,10 +5690,45 @@ static const char* const kControllerSetupLines[] = {
     "Select Templates at the top",
     "Select Gamepad in the list",
     "Select Apply Configuration at the bottom right",
-    "Hold L1 + R1 + L2 + R2 to hide this menu",
+    "",   // the "hide this menu" line: built per input device (see ControllerSetupHideLine)
 };
 static const int kControllerSetupLineCount =
     (int)(sizeof(kControllerSetupLines) / sizeof(kControllerSetupLines[0]));
+
+// Last line: how to hide the panel, for whichever input the player is using.
+static const char* const kSetupHideKbm  = "Press SHIFT + F2 to hide this menu";
+static const char* const kSetupHidePad  = "Hold LB + RB + LT + RT to hide this menu";   // text fallback
+static const char* const kSetupHideHold = "Hold ";
+static const char* const kSetupHideTail = " to hide this menu";
+static const int kSetupHideIcons[4] = { ICON_BTN_LB, ICON_BTN_RB, ICON_BTN_LT, ICON_BTN_RT };
+static const char* ControllerSetupLine(int i)
+{
+    if (i == kControllerSetupLineCount - 1)
+        return g_setupInputPad ? kSetupHidePad : kSetupHideKbm;
+    return kControllerSetupLines[i];
+}
+// The game's own LB/RB/LT/RT art can replace the text only in Classic Font mode (icons composite in
+// the g_rtActive flush) and only when the icon cache has them (launcher 0.6.0+).
+// forDraw: only the DS render target composites icons (DsDraw); the measure pass runs before it's live.
+static bool SetupHideUsesIcons(bool forDraw)
+{
+    bool ds = forDraw ? DsDraw() : (g_useDsFont && DSFont_Ready());
+    return g_setupInputPad && g_iconsReady && ds && ICON_BTN_RT < g_iconCount;
+}
+static int SetupIconH() { return g_dsCurPx > 0 ? g_dsCurPx : g_fontHeight; }
+static int SetupIconGap() { return max(2, SetupIconH() / 6); }
+static int SetupTextW(HDC hdc, const char* t)
+{
+    SIZE s; ZeroMemory(&s, sizeof(s));
+    MeasA(hdc, t, lstrlenA(t), g_dsCurPx, &s);   // DS font when it draws the text, else GDI
+    return s.cx;
+}
+static int SetupIconsLineW(HDC hdc)
+{
+    int w = SetupTextW(hdc, kSetupHideHold) + SetupTextW(hdc, kSetupHideTail);
+    for (int k = 0; k < 4; k++) w += IconWidthAt(kSetupHideIcons[k], SetupIconH()) + SetupIconGap();
+    return w;
+}
 
 static int ControllerSetupLineHeight(HDC hdc)
 {
@@ -5695,7 +5746,10 @@ static void MeasureControllerSetupPanel(HDC hdc, int* outW, int* outH)
     {
         SIZE s;
         ZeroMemory(&s, sizeof(s));
-        GetTextExtentPoint32A(hdc, kControllerSetupLines[i], lstrlenA(kControllerSetupLines[i]), &s);
+        const char* line = ControllerSetupLine(i);
+        GetTextExtentPoint32A(hdc, line, lstrlenA(line), &s);
+        if (i == kControllerSetupLineCount - 1 && SetupHideUsesIcons(false) && SetupIconsLineW(hdc) > s.cx)
+            s.cx = SetupIconsLineW(hdc);
         if (s.cx > maxW)
             maxW = s.cx;
     }
@@ -5711,7 +5765,27 @@ static int DrawControllerSetupPanel(HDC hdc, int x, int y)
     {
         COLORREF fill = (i == 0) ? RGB(255, 220, 40)    // gold heading
                                  : RGB(245, 245, 245);  // white body
-        DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), fill, kControllerSetupLines[i]);
+        if (i == kControllerSetupLineCount - 1 && SetupHideUsesIcons(true))
+        {
+            // "Hold [LB] [RB] [LT] [RT] to hide this menu" with the game's own button labels.
+            int cx = x;
+            DrawTextOutlineThick(hdc, cx, y, RGB(0, 0, 0), fill, kSetupHideHold);
+            cx += SetupTextW(hdc, kSetupHideHold);
+            int ih = SetupIconH(), gap = SetupIconGap();
+            int iy = y + max(0, (lineHeight - 6 - ih) / 2);
+            for (int k = 0; k < 4; k++)
+            {
+                int iw = IconWidthAt(kSetupHideIcons[k], ih);
+                DsIconCmd c; c.idx = kSetupHideIcons[k]; c.x = cx; c.y = iy; c.size = ih; c.w = iw;
+                g_dsIconCmds.push_back(c);
+                cx += iw + gap;
+            }
+            DrawTextOutlineThick(hdc, cx, y, RGB(0, 0, 0), fill, kSetupHideTail);
+        }
+        else
+        {
+            DrawTextOutlineThick(hdc, x, y, RGB(0, 0, 0), fill, ControllerSetupLine(i));
+        }
         y += lineHeight;
     }
     return y;
@@ -7674,7 +7748,7 @@ static void RenderOverlayToDIBAndSubmit()
             for (size_t ii = 0; ii < g_dsIconCmds.size(); ii++)
             {
                 const DsIconCmd& ic = g_dsIconCmds[ii];
-                BlitIconRT(ic.idx, ic.x, ic.y, ic.size);
+                BlitIconRT(ic.idx, ic.x, ic.y, ic.w > 0 ? ic.w : ic.size, ic.size);
             }
             for (size_t ci = 0; ci < g_dsCmds.size(); ci++)
             {
@@ -7818,14 +7892,17 @@ static XInputGetStateFn ResolveXInputGetState()
     return fn;
 }
 
-// True when any connected pad holds L1+R1+L2+R2 (LB+RB+LT+RT) at once. Slots that
-// report "not connected" are re-checked about once a second, since polling empty
-// slots in old XInput is slow.
-static bool AnyPadHoldsSetupHideCombo()
+// Polls every connected pad once. Returns true when any holds L1+R1+L2+R2 (LB+RB+LT+RT) at
+// once; *activity is set when any pad shows deliberate input (a button, a stick past the deadzone,
+// or a pulled trigger) and *connected when any pad answered. Slots that report "not connected" are
+// re-checked about once a second, since polling empty slots in old XInput is slow.
+static bool PollPadsForSetup(bool* activity, bool* connected)
 {
+    *activity = false; *connected = false;
     XInputGetStateFn getState = ResolveXInputGetState();
     if (!getState)
         return false;
+    bool combo = false;
 
     static int emptySlotWait[XUSER_MAX_COUNT] = { 0 };
     for (DWORD i = 0; i < XUSER_MAX_COUNT; i++)
@@ -7844,11 +7921,41 @@ static bool AnyPadHoldsSetupHideCombo()
             continue;
         }
 
+        *connected = true;
+        const XINPUT_GAMEPAD& g = st.Gamepad;
+        const SHORT DZ = 9000;
+        if (g.wButtons != 0 ||
+            g.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD || g.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD ||
+            g.sThumbLX > DZ || g.sThumbLX < -DZ || g.sThumbLY > DZ || g.sThumbLY < -DZ ||
+            g.sThumbRX > DZ || g.sThumbRX < -DZ || g.sThumbRY > DZ || g.sThumbRY < -DZ)
+            *activity = true;
+
         const WORD bumpers = XINPUT_GAMEPAD_LEFT_SHOULDER | XINPUT_GAMEPAD_RIGHT_SHOULDER;
-        if ((st.Gamepad.wButtons & bumpers) == bumpers &&
-            st.Gamepad.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD &&
-            st.Gamepad.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
-            return true;
+        if ((g.wButtons & bumpers) == bumpers &&
+            g.bLeftTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD &&
+            g.bRightTrigger > XINPUT_GAMEPAD_TRIGGER_THRESHOLD)
+            combo = true;
+    }
+    return combo;
+}
+
+// True when the keyboard or mouse shows input this tick: any key or mouse button down, or the
+// cursor moved a few pixels. Used to switch the setup panel's hide line to the Shift+F2 bind.
+static bool KbmActivity()
+{
+    static POINT lastPt = { -100000, -100000 };
+    POINT pt; bool moved = false;
+    if (GetCursorPos(&pt))
+    {
+        if (lastPt.x != -100000 && (abs(pt.x - lastPt.x) > 3 || abs(pt.y - lastPt.y) > 3))
+            moved = true;
+        lastPt = pt;
+    }
+    if (moved) return true;
+    for (int vk = 0x01; vk <= 0xFE; vk++)
+    {
+        if (vk == 0x07 || (vk >= 0x0A && vk <= 0x0B) || vk == 0xFF) continue;
+        if (GetAsyncKeyState(vk) & 0x8000) return true;
     }
     return false;
 }
@@ -7858,6 +7965,9 @@ static DWORD WINAPI HotkeyThread(LPVOID)
     WriteLogLine("Hotkey thread started.");
     bool prevDown = false;
     bool setupPrevDown = false;
+    bool setupKbPrevDown = false;     // Shift+F2 edge
+    bool setupDeviceInit = false;     // first poll seeds controller vs keyboard from pad presence
+    DWORD lastPadTick = 0;
     // Optional manual trigger for the Steam controller binding panel (0 = off).
     int bindKey = GetPrivateProfileIntA("Controller", "BindingNudgeKey", 0, g_iniPath);
     bool bindPrevDown = false;
@@ -7887,13 +7997,36 @@ static DWORD WINAPI HotkeyThread(LPVOID)
             bindPrevDown = bd;
         }
 
-        // Controller-setup hide combo: L1+R1+L2+R2 held together on any pad. On a rising
-        // edge it hides the panel and persists ShowControllerSetup=0 so it stays hidden
-        // across launches. Pads are only polled while the panel is showing.
+        // Controller-setup panel: hide binds + input-device detection. Holding L1+R1+L2+R2 on any
+        // pad, or Shift+F2 on the keyboard, hides the panel on a rising edge and persists
+        // ShowControllerSetup=0 so it stays hidden across launches. While it shows, the last input
+        // device decides which bind its "hide" line names. Only polled while the panel is showing.
         {
             if (g_showControllerSetup)
             {
-                bool down = AnyPadHoldsSetupHideCombo();
+                bool padActive = false, padConnected = false;
+                bool down = PollPadsForSetup(&padActive, &padConnected);
+                if (!setupDeviceInit)
+                {
+                    g_setupInputPad = padConnected;   // start on the controller bind if a pad is present
+                    setupDeviceInit = true;
+                }
+                if (gameFocused)
+                {
+                    DWORD nowTick = GetTickCount();
+                    if (padActive)
+                    {
+                        lastPadTick = nowTick;
+                        if (!g_setupInputPad) { g_setupInputPad = true; WriteLogLine("Setup panel: controller input -> showing LB+RB+LT+RT."); }
+                    }
+                    // Keyboard/mouse only wins after the pad has been idle ~1s, so Steam Input's
+                    // keyboard/mouse emulation of a pad can't flip the hint back and forth.
+                    else if (g_setupInputPad && nowTick - lastPadTick > 1000 && KbmActivity())
+                    {
+                        g_setupInputPad = false;
+                        WriteLogLine("Setup panel: keyboard/mouse input -> showing Shift+F2.");
+                    }
+                }
                 if (down && !setupPrevDown && gameFocused)
                 {
                     g_showControllerSetup = false;
@@ -7901,10 +8034,20 @@ static DWORD WINAPI HotkeyThread(LPVOID)
                     WriteLogLine("Controller setup panel hidden via L1+R1+L2+R2; ShowControllerSetup=0 saved.");
                 }
                 setupPrevDown = down;
+
+                bool kbHide = (GetAsyncKeyState(VK_SHIFT) & 0x8000) && (GetAsyncKeyState(VK_F2) & 0x8000);
+                if (kbHide && !setupKbPrevDown && gameFocused && g_showControllerSetup)
+                {
+                    g_showControllerSetup = false;
+                    WritePrivateProfileStringA("Overlay", "ShowControllerSetup", "0", g_iniPath);
+                    WriteLogLine("Controller setup panel hidden via Shift+F2; ShowControllerSetup=0 saved.");
+                }
+                setupKbPrevDown = kbHide;
             }
             else
             {
                 setupPrevDown = false;
+                setupKbPrevDown = false;
             }
         }
 

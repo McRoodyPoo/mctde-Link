@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## v0.4.9 - NoRedist
 
+- Works on a fresh Windows install: `d3d9.dll` now has the C++ runtime built in. Before, a PC without the Visual C++ 2015-2022 (x86) redistributable couldn't load mctde-Link and Dark Souls closed immediately.
+- The Spacewar Controller Setup panel names the right way to hide it for what you're using: "Press SHIFT + F2" on keyboard/mouse, or "Hold LB + RB + LT + RT" on a controller, drawn with the game's own button labels (needs the launcher's 0.6.0 icon cache; plain text otherwise). It follows your last input, and on Linux it notices a controller that Proton connects a few seconds after launch.
+- Shift+F2 hides the panel again (it had stopped working), and `[Overlay] ControllerSetupHideKey` / `ControllerSetupHideModifier` work again for rebinding it.
+- Windows builds now come from GitHub Actions (MSVC, Release x86), which also fails the build if `d3d9.dll` ever needs the C++ runtime again.
 - On Linux (Proton) an out-of-date mctde-Link no longer closes the game for an update that can't run there (the updater's PowerShell helper doesn't exist under Proton); the launcher updates Link when it next opens instead. The "install the launcher" prompt also counts the native Linux launcher as installed.
 - New `[Compatibility] RealD3D9Path`: forward to a different D3D9 DLL instead of the system one, e.g. DXVK renamed to `d3d9_dxvk.dll` to run on Vulkan. Falls back to the system `d3d9.dll` if it can't be used.
 

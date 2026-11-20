@@ -5715,8 +5715,10 @@ static bool SetupHideUsesIcons(bool forDraw)
     bool ds = forDraw ? DsDraw() : (g_useDsFont && DSFont_Ready());
     return g_setupInputPad && g_iconsReady && ds && ICON_BTN_RT < g_iconCount;
 }
-static int SetupIconH() { return g_dsCurPx > 0 ? g_dsCurPx : g_fontHeight; }
-static int SetupIconGap() { return max(2, SetupIconH() / 6); }
+// The labels' letters fill their whole crop, so at full font height they read taller than the
+// text around them; ~80% matches the DS font's capital height.
+static int SetupIconH() { int px = g_dsCurPx > 0 ? g_dsCurPx : g_fontHeight; return max(8, px * 4 / 5); }
+static const char* const kSetupHideSep = " + ";   // between labels, like the old text line
 static int SetupTextW(HDC hdc, const char* t)
 {
     SIZE s; ZeroMemory(&s, sizeof(s));
@@ -5725,8 +5727,8 @@ static int SetupTextW(HDC hdc, const char* t)
 }
 static int SetupIconsLineW(HDC hdc)
 {
-    int w = SetupTextW(hdc, kSetupHideHold) + SetupTextW(hdc, kSetupHideTail);
-    for (int k = 0; k < 4; k++) w += IconWidthAt(kSetupHideIcons[k], SetupIconH()) + SetupIconGap();
+    int w = SetupTextW(hdc, kSetupHideHold) + SetupTextW(hdc, kSetupHideTail) + 3 * SetupTextW(hdc, kSetupHideSep);
+    for (int k = 0; k < 4; k++) w += IconWidthAt(kSetupHideIcons[k], SetupIconH());
     return w;
 }
 
@@ -5771,14 +5773,21 @@ static int DrawControllerSetupPanel(HDC hdc, int x, int y)
             int cx = x;
             DrawTextOutlineThick(hdc, cx, y, RGB(0, 0, 0), fill, kSetupHideHold);
             cx += SetupTextW(hdc, kSetupHideHold);
-            int ih = SetupIconH(), gap = SetupIconGap();
-            int iy = y + max(0, (lineHeight - 6 - ih) / 2);
+            int ih = SetupIconH();
+            int px = g_dsCurPx > 0 ? g_dsCurPx : g_fontHeight;
+            int iy = y + max(0, (px - ih) / 2) + px / 12;   // sit on the text's baseline band
+            int sepW = SetupTextW(hdc, kSetupHideSep);
             for (int k = 0; k < 4; k++)
             {
                 int iw = IconWidthAt(kSetupHideIcons[k], ih);
                 DsIconCmd c; c.idx = kSetupHideIcons[k]; c.x = cx; c.y = iy; c.size = ih; c.w = iw;
                 g_dsIconCmds.push_back(c);
-                cx += iw + gap;
+                cx += iw;
+                if (k < 3)
+                {
+                    DrawTextOutlineThick(hdc, cx, y, RGB(0, 0, 0), fill, kSetupHideSep);
+                    cx += sepW;
+                }
             }
             DrawTextOutlineThick(hdc, cx, y, RGB(0, 0, 0), fill, kSetupHideTail);
         }

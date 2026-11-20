@@ -7948,19 +7948,12 @@ static bool PollPadsForSetup(bool* activity, bool* connected)
     return combo;
 }
 
-// True when the keyboard or mouse shows input this tick: any key or mouse button down, or the
-// cursor moved a few pixels. Used to switch the setup panel's hide line to the Shift+F2 bind.
+// True when the keyboard or mouse shows input this tick: any key or mouse button down. Used to
+// switch the setup panel's hide line to the Shift+F2 bind. Cursor MOVEMENT is deliberately not
+// counted: DSFix's cursor capture (and the game itself) re-centre the cursor every frame, which
+// would read as mouse input and flip a controller player's hint to the keyboard bind.
 static bool KbmActivity()
 {
-    static POINT lastPt = { -100000, -100000 };
-    POINT pt; bool moved = false;
-    if (GetCursorPos(&pt))
-    {
-        if (lastPt.x != -100000 && (abs(pt.x - lastPt.x) > 3 || abs(pt.y - lastPt.y) > 3))
-            moved = true;
-        lastPt = pt;
-    }
-    if (moved) return true;
     for (int vk = 0x01; vk <= 0xFE; vk++)
     {
         if (vk == 0x07 || (vk >= 0x0A && vk <= 0x0B) || vk == 0xFF) continue;

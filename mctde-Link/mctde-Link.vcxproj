@@ -72,6 +72,10 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;MCTDE_LINK_SINGLE_DLL;D3D9_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <!-- Static CRT (/MT): bake the C/C++ runtime into d3d9.dll so players don't need the
+           VC++ 2015-2022 x86 redistributable. With the default /MD, a PC without it fails to
+           load the DLL and DARKSOULS.exe exits at once with 0xC0000135 (DLL not found). -->
+      <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>

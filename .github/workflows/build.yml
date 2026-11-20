@@ -1,0 +1,55 @@
+name: Build (MSVC)
+
+# Builds mctde-Link's d3d9.dll with real MSVC (VS 2022, v143, Release|Win32) on GitHub's Windows
+# runners, so a Windows build doesn't depend on anyone's local Windows install. The DLL (+ PDB) is
+# uploaded as a workflow artifact on every run.
+
+on:
+  push:
+    paths:
+      - 'mctde-Link/**'
+      - '.github/workflows/build.yml'
+  pull_request:
+    paths:
+      - 'mctde-Link/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build d3d9.dll (Release, Win32)
+        run: msbuild mctde-Link\mctde-Link.vcxproj /m /p:Configuration=Release /p:Platform=Win32 /v:minimal
+
+      - name: Locate output
+        id: out
+        shell: pwsh
+        run: |
+          $dll = Get-ChildItem -Recurse -Filter d3d9.dll | Where-Object { $_.FullName -match '\\Release\\' } | Select-Object -First 1
+          if (-not $dll) { throw "d3d9.dll not found after build" }
+          "dir=$($dll.DirectoryName)" >> $env:GITHUB_OUTPUT
+          Write-Host "Built $($dll.FullName) ($($dll.Length) bytes)"
+
+      # Players must not need the VC++ redistributable: with a dynamic CRT, a PC without it can't
+      # load d3d9.dll and DARKSOULS.exe exits at once with 0xC0000135. Fail the build if it creeps back.
+      - name: Check for runtime DLL dependencies
+        shell: pwsh
+        run: |
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'Hostx64\\x86' } | Select-Object -First 1
+          $deps = & $dumpbin.FullName /nologo /dependents "${{ steps.out.outputs.dir }}\d3d9.dll"
+          $deps
+          $bad = $deps | Select-String -Pattern 'VCRUNTIME|MSVCP|api-ms-win-crt|ucrtbase'
+          if ($bad) { throw "d3d9.dll depends on the VC++ runtime (build with /MT): $($bad -join ', ')" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: d3d9-release-win32
+          path: |
+            ${{ steps.out.outputs.dir }}\d3d9.dll
+            ${{ steps.out.outputs.dir }}\d3d9.pdb
+          if-no-files-found: error

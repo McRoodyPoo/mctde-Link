@@ -1,5 +1,5 @@
 mctde=0.88
 mctde-link=0.4.9
-mctde-launcher=0.6.1
+mctde-launcher=0.7.0
 mctde-installer=0.5.0
 mctde-installer-linux=0.5.0
